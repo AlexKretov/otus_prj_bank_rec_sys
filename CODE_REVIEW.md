@@ -179,6 +179,15 @@ recommended_product_id = personal_recs.loc[rf['ncodpers'],'recommended_product_i
 | 12 | Слить редкие классы таргета; убрать `verbose=3`, мёртвый код, `pl.DataFrame` → `pd.DataFrame` | `modeling.ipynb` | ✅ классы с support меньше 100 сворачиваются в `other` (`MIN_CLASS_SUPPORT`); `verbose=3`, мёртвые ячейки (`comon_train`, `remove_correlated_features`) и `pl.DataFrame` удалены |
 | 13 | `async def predict` → `def`; Pydantic-схема запроса; `/health` | `app1.py` | ✅ `def predict(profile: ClientProfile)` — обычная функция (внутри CPU-bound pandas/featuretools), ответ — `PredictionResponse` (`prediction`, `product`, `confidence`, `top_k`), добавлен `GET /health` |
 
+**Условие вступления правок в силу:** код ноутбука и сервиса изменён, но артефакты
+(`fastapi/saved_model.pkl`, `fastapi/preprocessing_params.json`, `als_metrics.csv`,
+`classification_report.txt`) пересоздаются только при прогоне `modeling.ipynb` на реальных
+данных — до переобучения в репозитории лежат артефакты и метрики прошлого запуска,
+а `app1.py` для отсутствующего `preprocessing_params.json` работает на legacy-константах.
+Проверка выполнена на синтетическом датасете (ноутбук проходит целиком, сервис корректно
+работает на его артефактах); прогон на настоящем `data/train_ver2.csv` не выполнялся —
+в окружении сборки нет ключей Kaggle и самого файла.
+
 Дополнительно в рамках P1: `loader.ipynb` переведён с S3-бакета на загрузку датасета из
 соревнования Kaggle (`KAGGLE_USERNAME`/`KAGGLE_KEY`, `kaggle==1.7.4.5` в `requirements.txt`,
 шаблон `.env.example`); в `test.ipynb`, `eda.ipynb`, `rec_sys.ipynb` путь к датасету приведён
