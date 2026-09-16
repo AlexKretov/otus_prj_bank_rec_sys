@@ -36,16 +36,20 @@ PERSONAL_RECS_PATH, LOG_LEVEL.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Response, status
-from pydantic import BaseModel, Field
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, model_validator
 
 from preprocessing import PreprocessingParams, load_json, load_personal_recs
 from preprocessing import prepare_features as build_features
@@ -98,6 +102,25 @@ def _observe_request(endpoint: str, status_code: int, latency: Optional[float] =
         PREDICT_LATENCY.observe(latency)
     if prediction is not None:
         PREDICTION_COUNT.labels(prediction=prediction).inc()
+
+
+def _json_safe(value: Any) -> Any:
+    """Рекурсивно заменяет не-JSON-совместимые float (NaN, ±Infinity) строками.
+
+    `JSONResponse` сериализует через `json.dumps(allow_nan=False)` и падает с
+    `ValueError: Out of range float values are not JSON compliant`, если в теле
+    есть такие значения, — а стоковый обработчик 422 кладёт в тело сырой `input`
+    из ошибок валидации (test.ipynb шлёт пандасовские NaN JSON-токеном `NaN`).
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return 'NaN'
+        return 'Infinity' if value > 0 else '-Infinity'
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 # --- Загрузка артефактов ----------------------------------------------------
@@ -162,6 +185,24 @@ class ClientProfile(BaseModel):
     renta: Optional[float] = Field(None, description='Доход домохозяйства; None → медиана обучения')
     segmento: Optional[str] = None
 
+    @model_validator(mode='before')
+    @classmethod
+    def _non_finite_floats_to_none(cls, data: Any) -> Any:
+        """Пропуски pandas (NaN/±Infinity) → None: это «поля нет», а не ошибка.
+
+        test.ipynb шлёт целые строки train_ver2.csv через `json.dumps`
+        (allow_nan включён по умолчанию), поэтому пропуски приезжают
+        JSON-токенами `NaN`/`Infinity` → float('nan'), который `Optional[str]`
+        отвергает с 422. Семантически это отсутствие значения: дальше пропуск
+        закроют медианы/моды обучения в `fill_missing`, как при `None`.
+        """
+        if isinstance(data, dict):
+            return {
+                key: None if isinstance(value, float) and not math.isfinite(value) else value
+                for key, value in data.items()
+            }
+        return data
+
     # Флаги владения продуктами (ind_*_ult1): 1 — продукт есть, 0/None — нет.
     ind_ahor_fin_ult1: Optional[float] = None
     ind_aval_fin_ult1: Optional[float] = None
@@ -213,8 +254,23 @@ class HealthResponse(BaseModel):
 app = FastAPI(
     title='Bank product recommender',
     description='Рекомендация банковского продукта по профилю клиента (см. README.md).',
-    version='1.2.0',
+    version='1.2.1',
 )
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request, exc: RequestValidationError) -> JSONResponse:
+    """422 с JSON-совместимым телом: сырой `input` в ошибках может содержать NaN.
+
+    Стоковый обработчик FastAPI падает здесь с 500
+    (`ValueError: Out of range float values are not JSON compliant`), т.к.
+    `JSONResponse` сериализует через `json.dumps(allow_nan=False)`. Формат тела —
+    как у стокового: `{"detail": [...]}`.
+    """
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={'detail': _json_safe(jsonable_encoder(exc.errors()))},
+    )
 
 
 # --- Предобработка ----------------------------------------------------------
