@@ -1,7 +1,9 @@
 """Unit-тесты общего модуля предобработки (CODE_REVIEW §P2.16).
 
-Чистые функции тестируются без тяжёлых зависимостей; сквозной
-`prepare_features` требует featuretools/woodwork (есть в requirements.txt).
+Чистые функции и сквозной `prepare_features` тестируются без тяжёлых
+зависимостей: арифметика признаков считается pandas/numpy. Тест на паритет
+с featuretools (эталонная семантика старой DFS-версии) скипается, если
+featuretools не установлен.
 """
 
 from importlib.util import find_spec
@@ -22,6 +24,7 @@ from preprocessing import (
     NUMERIC_FEATURES,
     PRODUCTS,
     PreprocessingParams,
+    feature_engineering,
 )
 from tests.conftest import make_profile
 
@@ -202,10 +205,8 @@ def test_prepare_features_missing_fields_raises(legacy_params, tiny_personal_rec
         preprocessing.prepare_features({'ncodpers': 1}, legacy_params, tiny_personal_recs)
 
 
-@pytest.mark.skipif(find_spec('featuretools') is None, reason='нужны featuretools/woodwork')
 def test_prepare_features_golden(legacy_params, tiny_personal_recs):
     """Golden-test: фиксированный вход → ожидаемая матрица признаков."""
-    pytest.importorskip('featuretools')
     row = preprocessing.prepare_features(make_profile(), legacy_params, tiny_personal_recs)
 
     assert row.shape == (1, len(NUMERIC_FEATURES) + len(CATEGORICAL_FEATURES))
@@ -230,9 +231,7 @@ def test_prepare_features_golden(legacy_params, tiny_personal_recs):
     pd.testing.assert_frame_equal(row, again)
 
 
-@pytest.mark.skipif(find_spec('featuretools') is None, reason='нужны featuretools/woodwork')
 def test_prepare_features_unknown_client_zero_rec(legacy_params, tiny_personal_recs):
-    pytest.importorskip('featuretools')
     row = preprocessing.prepare_features(make_profile(ncodpers=999999), legacy_params,
                                          tiny_personal_recs)
     assert row['recommended_product_id'].iloc[0] == '0'
@@ -248,3 +247,123 @@ def test_base_columns_cover_model_features():
                'antiguedad * renta', 'NATURAL_LOGARITHM(antiguedad)',
                'NATURAL_LOGARITHM(renta)', 'SQUARE_ROOT(antiguedad)', 'SQUARE_ROOT(renta)'}
     assert set(BASE_COLUMNS) | derived >= set(CATEGORICAL_FEATURES) | set(NUMERIC_FEATURES)
+
+
+def test_feature_engineering_thread_safe():
+    """Параллельные вызовы не падают (регрессия на featuretools-гонку).
+
+    Старая версия строила featuretools EntitySet + DFS на каждый вызов;
+    при ~50 конкурентных запросах каждый четвёртый падал с
+    `KeyError: 'DataFrame main does not exist in bank_data'` → HTTP 500
+    → SLO success_rate ~70% в test.ipynb.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    profile = make_profile()
+
+    def one(_):
+        try:
+            row = preprocessing.prepare_features(dict(profile), PreprocessingParams(), None)
+            return None if 'antiguedad + renta' in row.columns else 'нет признаков'
+        except Exception as exc:  # noqa: BLE001 — любая ошибка = провал регрессии
+            return f'{type(exc).__name__}: {exc}'
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        errors = [result for result in executor.map(one, range(64)) if result]
+    assert not errors, errors[:3]
+
+
+@pytest.mark.skipif(find_spec('featuretools') is None, reason='нужен featuretools (эталон)')
+def test_feature_engineering_matches_featuretools():
+    """Паритет с DFS: те же колонки, dtypes и значения, что давал featuretools.
+
+    Эталон — дословно старая реализация (EntitySet + ft.dfs) до замены на
+    pandas/numpy. Граничные случаи включают нули и отрицательные значения
+    (log(0) → -inf, log/sqrt отрицательных → NaN, деление на ноль → inf).
+    """
+    import warnings
+
+    pytest.importorskip('woodwork')
+    import featuretools as ft
+    import woodwork
+
+    def reference_dfs(df):
+        entity_set = ft.EntitySet(id='bank_data')
+        entity_set = entity_set.add_dataframe(
+            dataframe_name='main', dataframe=df, index='unique_id', make_index=True,
+            logical_types={
+                'antiguedad': woodwork.logical_types.Double,
+                'renta': woodwork.logical_types.Double,
+                **{col: woodwork.logical_types.Categorical for col in df.columns
+                   if col not in ['antiguedad', 'renta']},
+            })
+        feature_matrix, _ = ft.dfs(
+            entityset=entity_set, target_dataframe_name='main',
+            trans_primitives=['add_numeric', 'multiply_numeric', 'divide_numeric',
+                              'natural_logarithm', 'square_root'],
+            agg_primitives=['mean', 'median', 'std', 'max', 'min', 'count', 'num_unique'],
+            where_primitives=['count'], max_depth=2, features_only=False, verbose=False)
+        matrix = feature_matrix.drop(columns=['unique_id', 'index'], errors='ignore')
+        matrix, _ = preprocessing.manual_transformations(matrix, None)
+        return matrix.loc[:, ~matrix.columns.duplicated()]
+
+    rng = np.random.default_rng(0)
+    size = 20
+    frame = pd.DataFrame({
+        'ind_empleado': rng.choice(['N', 'A'], size),
+        'pais_residencia': rng.choice(['ES', 'FR'], size),
+        'sexo': rng.choice(['H', 'V'], size),
+        'ind_nuevo': rng.choice([0.0, 1.0], size),
+        'antiguedad': rng.choice([-5, 0, 1, 25, 66, 200], size),
+        'indrel_1mes': rng.choice(['1.0', 'P'], size),
+        'tiprel_1mes': rng.choice(['A', 'I'], size),
+        'indresi': ['S'] * size,
+        'conyuemp': ['N'] * size,
+        'canal_entrada': rng.choice(['KHE', 'KAT'], size),
+        'indfall': ['N'] * size,
+        'cod_prov': rng.choice([28.0, 8.0], size),
+        'ind_actividad_cliente': rng.choice([0.0, 1.0], size),
+        'renta': rng.choice([0.0, -3.5, 50000.0, 120000.0, 250000.0], size),
+        'segmento': rng.choice(['02 - PARTICULARES', '03 - UNIVERSITARIO'], size),
+        **{product: rng.choice([0, 1], size) for product in PRODUCTS},
+        'total_products': rng.integers(0, 10, size),
+        'age_interval': rng.choice(['24-28', '37-41'], size),
+        'recommended_product_id': rng.choice([0, 'ind_tjcr_fin_ult1'], size),
+    })[BASE_COLUMNS]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        expected = reference_dfs(frame.copy())
+        actual, _ = feature_engineering(frame.copy())
+
+    assert list(actual.columns) == list(expected.columns)
+    # check_names=False: имя 'unique_id' у индекса — внутренний артефакт DFS
+    pd.testing.assert_frame_equal(actual, expected, check_names=False)
+
+
+def test_fold_rare_categories_matches_replace_semantics():
+    """Реализация через isin+map эквивалентна поколоночному replace.
+
+    Каверзные случаи: float-колонка со строковыми ключами (не матчатся),
+    числовые ключи на числовой колонке (матчатся), NaN, пустой словарь.
+    """
+    replacer = {
+        'cod_prov': {'28.0': 'other'},              # строковые ключи vs float — no-op
+        'indrel_1mes': {3.0: 'other'},              # числовой ключ — матчится
+        'sexo': {'H': 'other'},                     # обычный случай
+        'segmento': {},                             # пустой словарь — no-op
+    }
+    frame = pd.DataFrame({
+        'cod_prov': [28.0, 8.0, np.nan],
+        'indrel_1mes': [3.0, '1.0', 4.0],
+        'sexo': ['H', 'V', None],
+        'segmento': ['02 - PARTICULARES', '03 - UNIVERSITARIO', None],
+    })
+    expected = frame.copy()
+    for col, mapping in replacer.items():
+        if col in expected.columns and mapping:
+            expected[col] = expected[col].replace(mapping)
+
+    actual = preprocessing.fold_rare_categories(frame.copy(), replacer)
+    for col in frame.columns:
+        assert list(actual[col].fillna('#')) == list(expected[col].fillna('#')), col

@@ -15,6 +15,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "${VM_PORT:-8079}:${THE_PORT:-8079}"
+    networks:
+      default:
+        aliases:
+          # prometheus.yml скрейпит ml-service:8079 — alias гарантирует,
+          # что имя разрешается (hostname: сам по себе DNS-псевдонимом не является)
+          - ml-service
     hostname: ml-service
 
   prometheus:
@@ -36,6 +42,12 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASS:-admin}
+    volumes:
+      # Дашборд и provisioning: datasource (Prometheus) + автозагрузка дашбордов.
+      # Без этих маунтов Grafana поднимается пустой — дашборд приходится
+      # импортировать руками через UI.
+      - "./grafana.json:/var/lib/grafana/dashboards/bank-recommender.json:ro"
+      - "./grafana/provisioning:/etc/grafana/provisioning:ro"
     depends_on:
       - prometheus
     hostname: grafana

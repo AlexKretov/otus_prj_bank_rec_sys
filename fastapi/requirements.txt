@@ -1,13 +1,17 @@
 # Зависимости микросервиса (app1.py + preprocessing.py).
 # Версии совпадают с корневым requirements.txt; для обучения/ноутбуков
 # ставьте полный файл из корня репозитория.
+# featuretools/woodwork не нужны: арифметические признаки считаются
+# pandas/numpy (раньше DFS на каждый запрос стоил ~250 мс и падал гонкой
+# потоков — см. preprocessing.feature_engineering).
+# uvloop/httptools — C-реализации event loop и HTTP-парсера для uvicorn.
 pandas==2.2.3
 numpy==2.2.5
 scipy==1.15.3
 scikit-learn==1.6.1
-featuretools==1.31.0
-woodwork==0.31.0
 fastapi==0.115.8
 uvicorn==0.34.0
+uvloop==0.22.1
+httptools==0.8.0
 pyarrow==19.0.1
 prometheus_client==0.21.1

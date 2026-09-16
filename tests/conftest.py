@@ -80,7 +80,6 @@ def tiny_model_bundle():
     без настоящей `saved_model.pkl`.
     """
     pytest.importorskip('sklearn')
-    pytest.importorskip('featuretools')
     from sklearn.compose import ColumnTransformer
     from sklearn.ensemble import RandomForestClassifier
     from sklearn.pipeline import Pipeline
