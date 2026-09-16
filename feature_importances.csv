@@ -1,0 +1,40 @@
+feature,support,importance
+cat__recommended_product_id_0,True,0.10209139751803338
+num__NATURAL_LOGARITHM(antiguedad),True,0.08729024732286299
+cat__ind_ctma_fin_ult1_1,True,0.08572193897017677
+num__antiguedad + renta,True,0.0808193748500433
+cat__recommended_product_id_ind_ahor_fin_ult1,True,0.07028819463360289
+num__renta_vs_country_mean,True,0.066777155856914
+cat__ind_ctma_fin_ult1_0,True,0.0644809941002683
+num__antiguedad,True,0.055746563071610945
+cat__ind_cno_fin_ult1_0,True,0.05130769883223007
+cat__tiprel_1mes_I,True,0.0389185919396416
+num__log_renta,True,0.032336330807268186
+cat__ind_recibo_ult1_1,True,0.030925169896808997
+num__antiguedad / renta,True,0.023035216636162353
+num__renta_antiguedad_ratio,True,0.022964785172639966
+cat__ind_actividad_cliente_0.0,True,0.021319901797652755
+num__SQUARE_ROOT(antiguedad),True,0.02005880029850309
+num__antiguedad * renta,True,0.01961464684249803
+cat__ind_recibo_ult1_0,True,0.019217890572466877
+num__NATURAL_LOGARITHM(renta),True,0.01674398845013305
+cat__ind_actividad_cliente_1.0,True,0.014362095318510648
+cat__tiprel_1mes_A,True,0.014261861473529331
+num__renta,True,0.013066499205577823
+cat__ind_cno_fin_ult1_1,True,0.009626283877705718
+cat__ind_reca_fin_ult1_0,True,0.007388707639489453
+cat__total_products_5.0,True,0.006328266390647881
+cat__segmento_01 - TOP,True,0.00471971443242966
+cat__ind_cco_fin_ult1_0,True,0.004675779267096771
+cat__ind_reca_fin_ult1_1,True,0.0038100503508451985
+cat__ind_tjcr_fin_ult1_1,True,0.0027127439242818105
+cat__ind_cco_fin_ult1_1,True,0.002516865903659112
+cat__total_products_2.0,True,0.0023973519756188143
+num__renta / antiguedad,True,0.0022805856444688168
+cat__ind_ctop_fin_ult1_0,True,0.0007496736521441471
+cat__ind_tjcr_fin_ult1_0,True,0.000746465919011756
+cat__recommended_product_id_ind_cco_fin_ult1,True,0.0003729584883719631
+cat__canal_entrada_KFA,True,0.0002466163352359789
+num__SQUARE_ROOT(renta),True,4.437018881821367e-05
+cat__ind_nuevo_1.0,True,3.422244303910315e-05
+cat__canal_entrada_KAT,True,0.0
