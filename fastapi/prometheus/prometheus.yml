@@ -1,20 +1,14 @@
+# Скрейпинг метрик микросервиса (GET /metrics на ml_service).
+# Если сервис поднят вне compose на нестандартном порту, поправьте targets.
 global:
-  # как часто собирать метрики?
   scrape_interval: 15s
   evaluation_interval: 15s
-  # если за это время сборщик не собрал метрики, то процесс прерывается
   scrape_timeout: 10s
-  
 
 scrape_configs:
-  # имя сборщика
-  - job_name: 'scrapping-main-app'
-
-    # c какой страницы собирать метрики?
+  - job_name: 'bank-recommender'
     metrics_path: /metrics
     scheme: http
-    
     static_configs:
-    - targets:
-      # указывается адрес микросервиса
-      - app2:8079
+      - targets:
+          - ml-service:8079

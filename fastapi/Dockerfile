@@ -1,11 +1,23 @@
+# Образ микросервиса рекомендаций.
+# Сборка из корня репозитория (контекст — корень):
+#   docker build -f fastapi/Dockerfile .
+# Проще — через compose (см. README.md):
+#   docker compose -f fastapi/docker-compose.yaml up --build
 FROM python:3.11-slim
-LABEL author=${AUTHOR}
 
-#COPY . ./ml_service
-COPY . ./home/
-WORKDIR home/ml_service 
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
 
-RUN pip3 install -r ../requirements.txt
-VOLUME /metrics_reports
-EXPOSE ${THE_PORT}
-CMD uvicorn app2:app --reload --host ${THE_HOST} --port ${THE_PORT} 
+WORKDIR /app
+
+COPY fastapi/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY app1.py preprocessing.py ./
+# Артефакты обучения (создаёт modeling.ipynb). Если saved_model.pkl нет,
+# сервис всё равно поднимется: /predict ответит 503, /health — degraded.
+COPY fastapi/ ./fastapi/
+
+EXPOSE 8079
+
+CMD uvicorn app1:app --host 0.0.0.0 --port ${THE_PORT:-8079}

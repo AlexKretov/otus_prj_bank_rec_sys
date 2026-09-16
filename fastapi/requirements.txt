@@ -1,16 +1,13 @@
+# Зависимости микросервиса (app1.py + preprocessing.py).
+# Версии совпадают с корневым requirements.txt; для обучения/ноутбуков
+# ставьте полный файл из корня репозитория.
 pandas==2.2.3
-numpy==2.2.4
-matplotlib==3.10.1
-scipy==1.15.2
+numpy==2.2.5
+scipy==1.15.3
 scikit-learn==1.6.1
-requests
-load_dotenv==0.1.0
-dotenv==0.9.9
+featuretools==1.31.0
 woodwork==0.31.0
-uvicorn==0.34.2
-fastapi
-featuretools
-prometheus_client
-pyarrow
-prometheus_fastapi_instrumentator
-psutil
+fastapi==0.115.8
+uvicorn==0.34.0
+pyarrow==19.0.1
+prometheus_client==0.21.1
