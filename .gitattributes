@@ -1,0 +1,4 @@
+# Чистим outputs ноутбуков при коммите (CODE_REVIEW §7.1):
+#   pip install nbstripout && nbstripout --install
+# Без установленного фильтра атрибут harmless — git просто игнорирует его.
+*.ipynb filter=nbstripout

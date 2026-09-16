@@ -105,7 +105,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(latency_bucket[$__rate_interval])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(bank_recommender_predict_latency_seconds_bucket[$__rate_interval])) by (le))",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -175,7 +175,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "cpu_usage",
+          "expr": "rate(process_cpu_seconds_total[1m])",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",
@@ -190,7 +190,7 @@
           },
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "memory_usage",
+          "expr": "process_resident_memory_bytes",
           "fullMetaSearch": false,
           "hide": false,
           "includeNullMetadata": true,
@@ -201,7 +201,7 @@
           "useBackend": false
         }
       ],
-      "title": "Recources",
+      "title": "Resources",
       "type": "gauge"
     },
     {
@@ -262,7 +262,7 @@
         {
           "disableTextWrap": false,
           "editorMode": "builder",
-          "expr": "main_app_predictions_bucket",
+          "expr": "sum by (prediction) (bank_recommender_predictions_total)",
           "fullMetaSearch": false,
           "includeNullMetadata": true,
           "legendFormat": "__auto",

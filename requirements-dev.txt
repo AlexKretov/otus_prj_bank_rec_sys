@@ -1,0 +1,6 @@
+# Инструменты разработчика: тесты и линтер (CODE_REVIEW §P2.16, §P2.17).
+# Установка: pip install -r requirements.txt -r requirements-dev.txt
+# Запуск: pytest; ruff check .
+pytest==8.3.5
+httpx==0.28.1
+ruff==0.9.7

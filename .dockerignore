@@ -1,0 +1,14 @@
+# В образ микросервиса не копируем данные, ноутбуки и отчёты.
+data/
+mlruns/
+mlruns_artifacts/
+mlflow.db
+*.ipynb
+*.png
+*.html
+tests/
+.git/
+.venv/
+__pycache__/
+load_test_report.*
+image.png

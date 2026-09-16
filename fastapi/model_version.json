@@ -1,0 +1,71 @@
+{
+  "created_at": "2026-09-16T10:31:27+00:00",
+  "model_path": "fastapi/saved_model.pkl",
+  "mlflow_run_id": "e200be8d83f34a8dac0ad6a3eb785c42",
+  "mlflow_run_name": "fit",
+  "experiment": "RecSys_Modeling",
+  "dataset": "data/train_ver2.csv",
+  "target": {
+    "definition": "первый продукт, купленный клиентом в 2016 году, из шорт-листа",
+    "shortlist_rule": "доля покупок 2015 года >= 1%",
+    "classes": {
+      "0": "no_purchase",
+      "3": "ind_cco_fin_ult1",
+      "5": "ind_cno_fin_ult1",
+      "8": "ind_ctop_fin_ult1",
+      "9": "ind_ctpp_fin_ult1",
+      "12": "ind_dela_fin_ult1",
+      "13": "ind_ecue_fin_ult1",
+      "18": "ind_reca_fin_ult1",
+      "19": "ind_tjcr_fin_ult1",
+      "20": "ind_valo_fin_ult1",
+      "22": "ind_nomina_ult1",
+      "23": "ind_nom_pens_ult1",
+      "24": "ind_recibo_ult1",
+      "99": "other"
+    }
+  },
+  "train_shape": [
+    715129,
+    57
+  ],
+  "test_shape": [
+    306484,
+    57
+  ],
+  "best_params": {
+    "classifier__n_estimators": 32,
+    "classifier__max_depth": null,
+    "classifier__min_samples_split": 20
+  },
+  "cv_roc_auc_mean": 0.9014,
+  "metrics": {
+    "roc_auc_ovr_macro": 0.9316,
+    "accuracy": 0.7861,
+    "precision_weighted": 0.86,
+    "recall_weighted": 0.7861,
+    "f1_weighted": 0.8136,
+    "precision_macro": 0.4009,
+    "recall_macro": 0.605,
+    "f1_macro": 0.4684,
+    "pr_auc_macro": 0.421,
+    "cv_roc_auc_std": 0.0033,
+    "optuna_trials": 5
+  },
+  "label_map": {
+    "0": "no_purchase",
+    "3": "ind_cco_fin_ult1",
+    "5": "ind_cno_fin_ult1",
+    "8": "ind_ctop_fin_ult1",
+    "9": "ind_ctpp_fin_ult1",
+    "12": "ind_dela_fin_ult1",
+    "13": "ind_ecue_fin_ult1",
+    "18": "ind_reca_fin_ult1",
+    "19": "ind_tjcr_fin_ult1",
+    "20": "ind_valo_fin_ult1",
+    "22": "ind_nomina_ult1",
+    "23": "ind_nom_pens_ult1",
+    "24": "ind_recibo_ult1",
+    "99": "other"
+  }
+}

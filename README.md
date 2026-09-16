@@ -20,16 +20,25 @@
 | `eda.ipynb` | Исследовательский анализ данных и выводы |
 | `modeling.ipynb` | Основной ноутбук: предобработка, ALS-признак, обучение и тюнинг модели, артефакты, выводы |
 | `rec_sys.ipynb` | Офлайн-проверка инференса: предобработка одного клиента и предсказание сохранённой моделью |
-| `app1.py` | Микросервис предсказаний (FastAPI): `POST /predict`, `GET /health` |
-| `.env.example` | Шаблон `.env` с ключами Kaggle и настройками MLflow |
 | `test.ipynb` | Нагрузочный прогон сервиса; формирует `load_test_report.html` / `load_test_report.png` |
-| `recommendations_analysis.md` | Итоговый аналитический отчёт по данным |
+| `preprocessing.py` | Общий модуль предобработки: используют и `modeling.ipynb`, и сервис |
+| `app1.py` | Микросервис предсказаний (FastAPI): `POST /predict`, `GET /health`, `GET /metrics` |
+| `tests/` | Pytest-набор: предобработка, API, smoke-тесты артефактов |
+| `requirements-dev.txt` | Зависимости разработчика (`pytest`, `httpx`, `ruff`) |
+| `pyproject.toml` | Конфиги `pytest` и `ruff` |
+| `.env.example` | Шаблон `.env`: ключи Kaggle, настройки MLflow, сервиса и мониторинга |
+| `recommendations_analysis.md` | Итоговый аналитический отчёт по данным (см. также выводы в `eda.ipynb`) |
 | `CODE_REVIEW.md` | Результаты code review и план улучшений проекта |
 | `columns.txt` | Человекочитаемые названия колонок датасета |
 | `classification_report.txt`, `feature_importances.csv`, `als_metrics.csv` | Артефакты последнего обучающего запуска: отчёт о качестве, важности признаков, метрики ALS |
 | `replacer.json` | Старая копия словаря редких категорий; актуальный файл генерируется в `fastapi/replacer.json` |
-| `fastapi/` | Артефакты для сервиса (`saved_model.pkl`, `preprocessing_params.json`, `replacer.json`, `personal_als.parquet`) и файлы окружения |
+| `fastapi/` | Артефакты для сервиса (`saved_model.pkl`, `preprocessing_params.json`, `model_version.json`, `replacer.json`, `personal_als.parquet`) и инфраструктура (`Dockerfile`, `docker-compose.yaml`, `prometheus/`, `grafana.json`) |
 | `image.png` | Скриншот примера дашборда Grafana |
+
+Ноутбуки запускаются по порядку: `loader.ipynb` → `eda.ipynb` → `modeling.ipynb` →
+`rec_sys.ipynb` (офлайн-проверка) → `test.ipynb` (нагрузочный прогон поднятого сервиса).
+Канонические ноутбуки — только эти пять; курсовых «сшивок» (`full_final_prj`,
+`mle_final_prj2` из CODE_REVIEW §4.5) в репозитории нет.
 
 ## Построение модели
 
@@ -120,20 +129,28 @@ mlflow server \
 ## Развёртывание микросервиса
 
 Для запуска сервиса нужны артефакты (все создаются в `modeling.ipynb` в каталоге `fastapi/`):
-- `fastapi/saved_model.pkl` — обученный sklearn-пайплайн (`joblib.dump`);
+- `fastapi/saved_model.pkl` — обученный sklearn-пайплайн (`joblib.dump`), канонический экспорт;
 - `fastapi/preprocessing_params.json` — параметры предобработки, посчитанные при обучении
   (медианы, моды, границы клиппинга, возрастные бины, когорты дат, агрегаты, расшифровка классов);
+- `fastapi/model_version.json` — версия модели: run id, дата, гиперпараметры, метрики, классы;
 - `fastapi/replacer.json` — словарь сворачивания редких категорий в `other`;
 - `fastapi/personal_als.parquet` — персональные ALS-рекомендации, индексированные по `ncodpers`.
 
 Каталог артефактов переопределяется переменной окружения `ARTIFACTS_DIR` (см. `.env.example`).
-Если `preprocessing_params.json` отсутствует, сервис работает на legacy-константах из `app1.py`
-и предупреждает об этом в логе — такие константы могли разойтись с обучающим запуском.
+Если `preprocessing_params.json` отсутствует, сервис работает на legacy-константах
+из `preprocessing.py` и предупреждает об этом в логе — такие константы могли разойтись
+с обучающим запуском.
 
-Запуск:
+Запуск напрямую:
 
 ```bash
 uvicorn app1:app --host 0.0.0.0 --port 8079
+```
+
+Запуск через docker compose (из корня репозитория, вместе с Prometheus и Grafana):
+
+```bash
+docker compose -f fastapi/docker-compose.yaml up --build
 ```
 
 Сервис принимает `POST /predict` с JSON-профилем клиента (поля как в `columns.txt`,
@@ -142,9 +159,37 @@ uvicorn app1:app --host 0.0.0.0 --port 8079
 "top_k": [...]}`. `GET /health` возвращает статус сервиса и список загруженных артефактов.
 Если модель не найдена, `/predict` отвечает `503`; ошибки валидации — `422` с именем поля.
 
-> Инфраструктурные файлы (Dockerfile, docker-compose, конфиги Prometheus/Grafana) в репозиторий
-> пока не закоммичены — соответствующий раздел будет дополнен после их добавления.
-> Пример дашборда см. в `image.png`.
+### Мониторинг
+
+`GET /metrics` отдаёт метрики в формате Prometheus: счётчик запросов
+`bank_recommender_requests_total`, гистограмму латентности
+`bank_recommender_predict_latency_seconds` и счётчик предсказаний по классам
+`bank_recommender_predictions_total` (плюс стандартные `process_*`).
+Конфиг скрейпинга — `fastapi/prometheus/prometheus.yml`, дашборд для импорта
+в Grafana — `fastapi/grafana.json` (p95 латентности, ресурсы процесса,
+распределение предсказаний). Порты и учётные данные задаются переменными
+окружения (см. `.env.example`: `VM_PORT`, `THE_PORT`, `PROMETHEUS_PORT`,
+`GRAFANA_PORT`, `GRAFANA_USER`, `GRAFANA_PASS`). Пример дашборда см. в `image.png`.
+
+### Версия модели
+
+Канонический экспорт — `fastapi/saved_model.pkl` (его читают и сервис, и
+`rec_sys.ipynb`); MLflow-модель (`runs:/<run_id>/model`) — только для истории
+экспериментов. Версия зафиксирована в `fastapi/model_version.json`:
+
+| Параметр | Значение |
+|---|---|
+| MLflow run id | `e200be8d83f34a8dac0ad6a3eb785c42` (эксперимент `RecSys_Modeling`) |
+| Дата обучения | 2026-09-16 |
+| train / test | 715 129 / 306 484 объектов, 57 признаков |
+| Гиперпараметры | `n_estimators=32`, `max_depth=None`, `min_samples_split=20` |
+| CV ROC-AUC (train) | 0.9014 |
+| ROC-AUC ovr macro (test) | 0.9316 |
+| F1 macro / precision macro / recall macro | 0.4684 / 0.4009 / 0.6050 |
+| PR-AUC macro | 0.4210 |
+
+Полный per-class отчёт — `classification_report.txt`, метрики ALS —
+`als_metrics.csv` (precision@5 ≈ 0.043, recall@5 ≈ 0.138, hit_rate ≈ 0.180).
 
 ### Тестовый запрос к микросервису
 
@@ -156,12 +201,33 @@ curl -X POST "http://localhost:8079/predict" \
 
 ## Нагрузочное тестирование
 
-Запустите `test.ipynb` (сервис должен быть поднят на порту 8079). По итогам формируются
+Запустите `test.ipynb` (сервис должен быть поднят на порту 8079). Тест шлёт запросы
+параллельно пулом воркеров, использует реальные профили клиентов из датасета,
+проверяет схему каждого ответа и SLO — по итогам формируются
 `load_test_report.html` и `load_test_report.png` в корне репозитория.
+Параметры задаются переменными окружения (см. `.env.example`): `LOAD_TEST_URL`,
+`LOAD_TEST_WORKERS`, `LOAD_TEST_MAX_TIME`, `LOAD_TEST_SAMPLES`,
+`LOAD_TEST_P95_SLO_MS`, `LOAD_TEST_MIN_SUCCESS_RATE`.
+
+## Разработка
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+pytest          # unit-тесты предобработки, API и smoke-тесты артефактов
+ruff check .    # линтер (pyflakes + pycodestyle)
+```
+
+Чтобы не коммитить вывод ячеек ноутбуков (`nbstripout`, CODE_REVIEW §7.1):
+
+```bash
+pip install nbstripout && nbstripout --install
+```
+
+(`.gitattributes` уже содержит фильтр; без установленного `nbstripout` git его игнорирует.)
 
 ## Ограничения и известные проблемы
 
-Проведено code review (`CODE_REVIEW.md`), план P0 и P1 выполнен; ниже — оставшиеся оговорки:
+Проведено code review (`CODE_REVIEW.md`), план P0–P2 выполнен; ниже — оставшиеся оговорки:
 
 - **Таргет.** Целевая переменная многоклассовая: код первого купленного в 2016 году продукта
   из шорт-листа, `0` — покупки не было, `other` — куплен редкий продукт. Шорт-лист ограничен
@@ -176,9 +242,15 @@ curl -X POST "http://localhost:8079/predict" \
   клиентов встречаются и в train, и в test, поэтому метрики оптимистичнее честного временного
   сценария. Качество ALS измеряется на клиентах, присутствующих и в 2015, и в 2016 году, —
   эта метрика тоже оптимистична.
-- **Инфраструктура.** Cервис отдаёт только `/predict` и `/health`: `/metrics` для Prometheus
-  и закоммиченные конфиги мониторинга — в плане. Нагрузочный прогон (`test.ipynb`) выполняется вручную.
-- **Артефакты обучения** (`fastapi/saved_model.pkl` и др.) в репозитории не лежат: их нужно
-  получить, прогнав `loader.ipynb` → `modeling.ipynb` (см. «Данные» и «Развёртывание»).
-- Дальнейшие шаги — план P2 в `CODE_REVIEW.md` (общий модуль предобработки, `pytest`-набор,
-  `ruff`, `/metrics`).
+- **Инфраструктура.** Мониторинг (`/metrics`, Prometheus, дашборд Grafana) покрывает
+  базовые сигналы: RPS, латентность, распределение предсказаний, ресурсы процесса.
+  Алертов и дрейф-мониторинга признаков нет. Нагрузочный прогон (`test.ipynb`)
+  выполняется вручную.
+- **Артефакты обучения** (`fastapi/saved_model.pkl` и др.) в репозитории лежат частично:
+  модель нужно получить, прогнав `loader.ipynb` → `modeling.ipynb`
+  (см. «Данные» и «Развёртывание»); параметры предобработки, ALS-рекомендации
+  и версия модели закоммичены.
+- Возможные следующие шаги сверх P2: считать статистики предобработки только на train
+  (убрать утечку до сплита), временное разбиение вместо стратифицированного,
+  замена featuretools-DFS для одной строки на pandas-арифметику (быстрее инференс),
+  перенос отчётов в `artifacts/`.
