@@ -213,3 +213,33 @@ recommended_product_id = personal_recs.loc[rf['ncodpers'],'recommended_product_i
   исправлено в `preprocessing.py` и в `modeling.ipynb` (яч. 13).
 
 **Ожидаемый эффект:** после P0 проект устанавливается, сервис отдаёт корректные признаки (включая главный — персональную рекомендацию), а инструкции запуска соответствуют содержимому репозитория. После P1 метрики становятся честными и воспроизводимыми, а переобучение перестаёт ломать прод из-за разошедшихся констант. P2 закрепляет результат тестами и снижает цену будущих правок.
+
+### P3 — «оставшиеся огрехи из README» — ✅ выполнено 16.09.2026
+
+Пункты из раздела «Ограничения и известные проблемы» README, которые были заявлены как
+«следующие шаги сверх P2» (статистики только на train, временное разбиение, перенос отчётов
+в `artifacts/`), плюс заодно найденные дефекты.
+
+| # | Действие | Файлы | Статус |
+|---|----------|-------|--------|
+| P3.1 | Статистики предобработки обучаются только на train (медианы, моды, квантили клиппинга, возрастные бины, когорты дат, наборы редких категорий, групповые агрегаты) | `preprocessing.py`, `modeling.ipynb` | ✅ `fit_preprocessing_params(df)` (все fit-статистики, перенесённые `calculate_age_intervals`/`create_time_cohorts` из ноутбука) + `apply_preprocessing(df, params)`; `prepare_features` переиспользует `apply_preprocessing` — train/serve путь един; агрегаты обучаются в `feature_engineering(X_train)` |
+| P3.2 | Агрегаты по невиданным категориям: fallback `__default__` вместо NaN | `preprocessing.py` | ✅ в словари агрегатов при fit пишется ключ `__default__` (глобальная статистика train); `map` при apply/проде покрывает категории, отсутствовавшие в train, иначе RandomForest падал бы на NaN. Для старых артефактов без `__default__` — fallback через среднее значений словаря |
+| P3.3 | Временное разбиение вместо стратифицированного | `preprocessing.py`, `modeling.ipynb` | ✅ `temporal_split(dates)`. ⚠️ Разбиение по **дате среза** (`fecha_dato`) экспериментально оказалось **вырожденным**: ~65% клиентов имеют последний срез 2015-12-28, а остаток — ушедшие раньше клиенты оттока, у которых «покупок 2016» нет априори → train из бывших клиентов с таргетом 0. Выбран осмысленный вариант: разбиение по **дате привлечения** (`fecha_alta`): train — привлечённые до cutoff (≈70%), test — новее. Сплит не зависит от исхода 2016-го, клиенты в одной строке, дата - настоящая временная ось. Зафиксировано в `preprocessing_params.json` (`split`), `model_version.json` и MLflow (`split_type=temporal_fecha_alta`) |
+| P3.4 | Сворачивание редких категорий: строковое сравнение (устранение train/serve skew) | `preprocessing.py`, `tests` | ✅ обучение приводит колонки к str до подсчёта частот, а прод сравнивал float к строковым ключам — редкие `cod_prov`/`ind_nuevo` не сворачивались (OHE молча занулял). Теперь словари со строковыми ключами сравниваются в строковом домене; словари с числовыми ключами — в исходном. Тест заменён на `test_fold_rare_categories_matches_training_semantics` |
+| P3.5 | Индексация ALS-матрицы (§3, п.7 фиксировал лишь отсутствие валидации ALS; индексацию заметили позже) | `modeling.ipynb` | ✅ csr-матрица строилась по строкам (0..N), а `recommend()` вызывался с `user_map`-индексами → рекомендации приписывались «соседнему» клиенту (off-by-one против user_map: сырые ncodpers 1..N против индексов 0..N-1). Исправлено: строки матрицы — `ncodpers.map(user_map)`. Числа в als_metrics до пересчёта относятся к старой индексации |
+| P3.6 | Метрики ALS в двух скоупах | `modeling.ipynb` | ✅ `artifacts/als_metrics.csv` получил колонку `scope`: `common_users_2015_2016` (старый скоуп) и `all_users_2016` (все покупатели 2016-го, cold-start без рекомендаций → hits=0) — честная оценка системной качества |
+| P3.7 | Дрейф-мониторинг признаков (PSI) | `drift.py`, `app1.py`, `preprocessing.py`, `tests` | ✅ `compute_drift_reference` (децили age/antiguedad/renta train) в `preprocessing_params.json`; `DriftMonitor` — потокобезопасное скользящее окно входных значений в сервисе; PSI на скрейпе → gauge `bank_recommender_drift_psi`; `GET /drift` — JSON-отчёт; `DRIFT_WINDOW_SIZE`/`DRIFT_MIN_SAMPLES`. Профили без значений не наблюдаются (медианы обучения «вымывали» бы сдвиг). Версия сервиса 1.3.0 |
+| P3.8 | Алерты Prometheus | `fastapi/prometheus/alerts.yml`, `fastapi/prometheus/prometheus.yml`, `fastapi/docker-compose.yaml` | ✅ правила: простой (up==0), p95 > 2 с, доля 5xx > 1%, PSI-дрейф > 0.25. Alertmanager намеренно не добавлен (сработки видны в UI Prometheus); путь для уведомлений — в README |
+| P3.9 | Нагрузочный тест как скрипт (можно из CI) | `load_test.py`, `test.ipynb` | ✅ вся логика — в `load_test.py` (env-параметры, SLO, код возврата 0/1, отчёты в `artifacts/`); `test.ipynb` — тонкая обёртка |
+| P3.10 | Отчёты переехали в `artifacts/` | репозиторий | ✅ `classification_report.txt`, `feature_importances.csv`, `als_metrics.csv`, `load_test_report.html`/`.png`; пути обновлены в ноутбуках/скриптах/тестов/README |
+| P3.11 | `requirements.txt` не резолвился | `requirements.txt` | ✅ `mlflow==2.7.1` требовал `numpy<2` и `pyarrow<14` при пинах `numpy==2.2.5`/`pyarrow==19.0.1` → ResolutionImpossible. Обновлено `mlflow==2.22.1` (numpy<3, pyarrow<20); пустой `pip install --dry-run -r requirements.txt` проходит |
+
+Проверка: полный прогон `modeling.ipynb` на синтетическом датасете (~60k строк, 6.4k
+клиентов, реалистичные правила покупок) с MLflow-сервером — ноутбук выполняется до конца,
+артефакты обновляются, сервис поднимается на них и отвечает на `/predict`, `/drift`,
+`/metrics`, короткий прогон `load_test.py` проходит. Тесты: 61 тест (`preprocessing`,
+fit/apply/train-serve-паритет, `temporal_split`, дрейф, API) + `ruff check` — чисто.
+Прогон на настоящем `data/train_ver2.csv` не выполнялся (в окружении нет ключей Kaggle
+и файла данных): закоммиченные артефакты (`fastapi/*`, `artifacts/*`) остаются от
+предыдущего реального запуска и обновятся после переобучения — модель и сервис
+обратно совместимы (legacy-пути сохранены).

@@ -164,13 +164,43 @@ def test_manual_transformations_train_serve_consistency():
     assert set(aggregates) == {'mean_renta_by_pais_residencia', 'mean_renta_by_segmento',
                                'median_antiguedad_by_pais_residencia',
                                'median_antiguedad_by_segmento'}
-    assert aggregates['mean_renta_by_pais_residencia'] == {'ES': 150.0, 'FR': 300.0}
+    assert aggregates['mean_renta_by_pais_residencia'] == {
+        'ES': 150.0, 'FR': 300.0, '__default__': 200.0}
 
     single = frame.iloc[[0]].copy()
     served, _ = preprocessing.manual_transformations(single, aggregates)
-    for col in aggregates:
+    for col in set(aggregates) - {'renta_vs_country_mean'}:
         assert served[col].iloc[0] == trained[col].iloc[0]
     assert served['renta_vs_country_mean'].iloc[0] == pytest.approx(100.0 / 150.0)
+
+
+def test_manual_transformations_unseen_category_uses_default():
+    """Категория, которой не было при обучении, → '__default__', а не NaN.
+
+    При временном разбиении и на проде встречаются значения, отсутствовавшие
+    в train; NaN в числовых признаках ронял бы RandomForest.
+    """
+    trained, aggregates = preprocessing.manual_transformations(pd.DataFrame({
+        'pais_residencia': ['ES', 'FR'], 'segmento': ['A', 'B'],
+        'renta': [100.0, 300.0], 'antiguedad': [10.0, 30.0],
+    }), None)
+    served, _ = preprocessing.manual_transformations(pd.DataFrame({
+        'pais_residencia': ['XX'], 'segmento': ['ZZ'],
+        'renta': [60.0], 'antiguedad': [5.0],
+    }), aggregates)
+    first = served.iloc[0]
+    assert first['mean_renta_by_pais_residencia'] == pytest.approx(200.0)  # mean по train
+    assert first['median_antiguedad_by_segmento'] == pytest.approx(20.0)  # median по train
+    assert not served[['mean_renta_by_pais_residencia', 'renta_vs_country_mean']].isna().any().any()
+    # агрегаты старого формата (без '__default__') — fallback через среднее значений
+    legacy_aggregates = {key: {cat: val for cat, val in values.items() if cat != '__default__'}
+                         for key, values in aggregates.items()}
+    served_legacy, _ = preprocessing.manual_transformations(pd.DataFrame({
+        'pais_residencia': ['XX'], 'segmento': ['ZZ'],
+        'renta': [60.0], 'antiguedad': [5.0],
+    }), legacy_aggregates)
+    assert not served_legacy[['mean_renta_by_pais_residencia',
+                              'renta_vs_country_mean']].isna().any().any()
 
 
 def test_add_total_products_sums_flags():
@@ -341,15 +371,18 @@ def test_feature_engineering_matches_featuretools():
     pd.testing.assert_frame_equal(actual, expected, check_names=False)
 
 
-def test_fold_rare_categories_matches_replace_semantics():
-    """Реализация через isin+map эквивалентна поколоночному replace.
+def test_fold_rare_categories_matches_training_semantics():
+    """Строковые ключи сравниваются в строковом домене — как на обучении.
 
-    Каверзные случаи: float-колонка со строковыми ключами (не матчатся),
-    числовые ключи на числовой колонке (матчатся), NaN, пустой словарь.
+    На обучении колонки приводились к str до подсчёта частот, поэтому ключи
+    словаря — строки, и float-значение 28.0 из запроса должно сворачиваться
+    по ключу '28.0'. Старая семантика (равенство поколоночному `replace`)
+    сравнивала в исходном домене и float не сворачивала — train/serve skew.
+    Числовые ключи по-прежнему работают в исходном домене.
     """
     replacer = {
-        'cod_prov': {'28.0': 'other'},              # строковые ключи vs float — no-op
-        'indrel_1mes': {3.0: 'other'},              # числовой ключ — матчится
+        'cod_prov': {'28.0': 'other'},              # строковый ключ, float-колонка
+        'indrel_1mes': {3.0: 'other'},              # числовой ключ — исходный домен
         'sexo': {'H': 'other'},                     # обычный случай
         'segmento': {},                             # пустой словарь — no-op
     }
@@ -359,11 +392,145 @@ def test_fold_rare_categories_matches_replace_semantics():
         'sexo': ['H', 'V', None],
         'segmento': ['02 - PARTICULARES', '03 - UNIVERSITARIO', None],
     })
-    expected = frame.copy()
-    for col, mapping in replacer.items():
-        if col in expected.columns and mapping:
-            expected[col] = expected[col].replace(mapping)
-
     actual = preprocessing.fold_rare_categories(frame.copy(), replacer)
-    for col in frame.columns:
-        assert list(actual[col].fillna('#')) == list(expected[col].fillna('#')), col
+    assert list(actual['cod_prov'].fillna('#')) == ['other', 8.0, '#']
+    assert list(actual['indrel_1mes'].fillna('#')) == ['other', '1.0', 4.0]
+    assert list(actual['sexo'].fillna('#')) == ['other', 'V', '#']
+    assert list(actual['segmento'].fillna('#')) == [
+        '02 - PARTICULARES', '03 - UNIVERSITARIO', '#']
+
+
+# --- P3: статистики только на train, временное разбиение ---------------------
+
+
+def make_raw_clients(n=60, seed=42):
+    """Синтетический raw-фрейм профилей (как срез train_ver2.csv) для fit/apply."""
+    rng = np.random.default_rng(seed)
+    frame = pd.DataFrame({
+        'ind_empleado': rng.choice(['N', 'A', 'S', np.nan], n, p=[0.7, 0.1, 0.1, 0.1]),
+        'pais_residencia': rng.choice(['ES', 'FR', 'MX', 'ZZ'], n, p=[0.8, 0.1, 0.05, 0.05]),
+        'sexo': rng.choice(['H', 'V'], n),
+        'age': rng.normal(45, 15, n).round(0).astype(int),
+        'fecha_alta': rng.choice(['2010-05-17', '2012-01-01', '2014-07-28', None], n),
+        'ind_nuevo': rng.choice([0.0, 1.0], n, p=[0.9, 0.1]),
+        'antiguedad': np.where(rng.random(n) < 0.05, -999999.0,
+                               rng.integers(0, 200, n).astype(float)),
+        'ult_fec_cli_1t': rng.choice(['2015-06-30', '2015-12-24', None], n),
+        'indrel_1mes': rng.choice(['1.0', 'P', 3.0], n),
+        'tiprel_1mes': rng.choice(['A', 'I'], n),
+        'indresi': ['S'] * n,
+        'conyuemp': ['N'] * n,
+        'canal_entrada': rng.choice(['KHE', 'KAT', 'K00'], n, p=[0.8, 0.1, 0.1]),
+        'indfall': ['N'] * n,
+        'cod_prov': rng.choice([28.0, 8.0, 47.0], n, p=[0.8, 0.1, 0.1]),
+        'ind_actividad_cliente': rng.choice([0.0, 1.0], n),
+        'renta': np.round(rng.uniform(10000.0, 300000.0, n), 2),
+        'segmento': rng.choice(['01 - TOP', '02 - PARTICULARES', '03 - UNIVERSITARIO'], n),
+    })
+    for product in PRODUCTS:
+        frame[product] = rng.choice([0, 1], n, p=[0.7, 0.3])
+    return frame
+
+
+def test_fit_preprocessing_params_computed_on_fit_frame():
+    """Статистики считаются из переданного (train) фрейма и воспроизводимы."""
+    frame = make_raw_clients()
+    params = preprocessing.fit_preprocessing_params(frame)
+    # медианы — ровно по train-фрейму (antiguedad уже без сентинели -999999)
+    cleaned = preprocessing.coerce_numeric(frame.copy())
+    assert params.medians['age'] == pytest.approx(float(cleaned['age'].median()))
+    assert params.medians['renta'] == pytest.approx(float(cleaned['renta'].median()))
+    assert params.medians['antiguedad'] == pytest.approx(
+        float(cleaned['antiguedad'].median()))
+    # клиппинг — квантили 1%/96% по train
+    work = preprocessing.fill_missing(cleaned, params.medians, params.modes)
+    assert params.clip_bounds['renta'] == pytest.approx(
+        [float(work['renta'].quantile(0.01)), float(work['renta'].quantile(0.96))])
+    # возрастные бины покрывают train-возраста
+    assert params.age_intervals[0][0] <= work['age'].min()
+    assert params.age_intervals[-1][1] >= work['age'].max()
+    # когорты дат прошли самопроверку: спецификация воспроизводит обучающие метки
+    assert set(params.date_cohorts) == {'fecha_alta', 'ult_fec_cli_1t'}
+    # эталон дрейфа посчитан по трём числовым признакам
+    assert set(params.drift_reference) == {'age', 'antiguedad', 'renta'}
+    for reference in params.drift_reference.values():
+        assert len(reference['edges']) == len(reference['shares']) + 1
+        assert sum(reference['shares']) == pytest.approx(1.0)
+
+
+def test_fit_apply_train_serve_parity(tiny_personal_recs):
+    """Строка применённой батч-предобработки == prepare_features того же профиля.
+
+    Главный train/serve-инвариант P2 теперь работает и в новом режиме
+    «fit на train → apply на test»: признаки одного и того же клиента
+    совпадают между офлайном и продом один в один.
+    """
+    fit_frame = make_raw_clients()
+    params = preprocessing.fit_preprocessing_params(fit_frame)
+    # агрегаты обучения (как в modeling.ipynb: feature_engineering на train)
+    batch = preprocessing.apply_preprocessing(fit_frame.copy(), params)
+    batch['recommended_product_id'] = '0'  # на обучении — подмёрж ALS-таблицы
+    batch = batch[BASE_COLUMNS]
+    batch['antiguedad'] = batch['antiguedad'].astype(int)
+    features, aggregates = preprocessing.feature_engineering(batch)
+
+    # прод-эквивалент: те же параметры (с агрегатами train), построчно
+    params = preprocessing.PreprocessingParams(
+        medians=params.medians, modes=params.modes, clip_bounds=params.clip_bounds,
+        age_intervals=params.age_intervals, date_cohorts=params.date_cohorts,
+        replacer=params.replacer, aggregates=aggregates, source='test')
+
+    for i in (0, 7, len(fit_frame) - 1):
+        profile = fit_frame.iloc[i].to_dict()
+        profile['ncodpers'] = 424242  # клиента нет в ALS-таблице → rec 0, как в batch
+        row = preprocessing.prepare_features(profile, params, tiny_personal_recs)
+        expected = features.iloc[[i]].copy()
+        assert set(row.columns) == set(expected.columns)
+        for col in row.columns:
+            actual_value = row.iloc[0][col]
+            expected_value = expected.iloc[0][col]
+            if col in NUMERIC_FEATURES:
+                actual_float = float(actual_value)
+                expected_float = float(expected_value)
+                both_nan = np.isnan(actual_float) and np.isnan(expected_float)
+                assert both_nan or actual_float == pytest.approx(expected_float, abs=1e-6), col
+            else:
+                assert str(actual_value) == str(expected_value), col
+
+
+def test_temporal_split_orders_by_snapshot_date():
+    dates = pd.Series(pd.to_datetime(
+        ['2015-01-28'] * 10 + ['2015-05-28'] * 10 + ['2015-12-28'] * 10))
+    cutoff, train_mask, test_mask = preprocessing.temporal_split(dates, test_size=0.3)
+    assert train_mask.sum() and test_mask.sum()
+    assert dates[train_mask].max() <= cutoff < dates[test_mask].min()
+    # границы не пересекаются: поздние срезы целиком в test
+    assert not (train_mask & test_mask).any()
+    assert (train_mask | test_mask).all()
+
+
+def test_temporal_split_two_dates_both_sides_non_empty():
+    dates = pd.Series(pd.to_datetime(['2015-01-28'] * 7 + ['2015-02-28'] * 3))
+    _, train_mask, test_mask = preprocessing.temporal_split(dates, test_size=0.3)
+    assert train_mask.any() and test_mask.any()
+
+
+def test_temporal_split_single_date_raises():
+    dates = pd.Series(pd.to_datetime(['2015-01-28'] * 10))
+    with pytest.raises(ValueError, match='2 различные даты'):
+        preprocessing.temporal_split(dates)
+
+
+def test_compute_drift_reference_deciles():
+    frame = pd.DataFrame({'age': np.arange(100, dtype=float),
+                          'antiguedad': np.arange(100, dtype=float),
+                          'renta': np.concatenate([[np.nan], np.arange(1, 100, dtype=float)])})
+    reference = preprocessing.compute_drift_reference(frame, n_bins=10)
+    assert set(reference) == {'age', 'antiguedad', 'renta'}
+    for info in reference.values():
+        assert len(info['edges']) == 10 + 1
+        assert info['edges'][0] == float('-inf') and info['edges'][-1] == float('inf')
+        assert sum(info['shares']) == pytest.approx(1.0)
+    # на 100 равномерно различных значениях децили — ровно десятые доли
+    assert reference['age']['shares'] == pytest.approx([0.1] * 10, abs=1e-9)
+    assert reference['antiguedad']['shares'] == pytest.approx([0.1] * 10, abs=1e-9)

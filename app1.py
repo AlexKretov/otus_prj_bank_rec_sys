@@ -11,7 +11,10 @@
     POST /predict  — предсказание продукта по профилю клиента;
     GET  /health   — статус сервиса и загруженных артефактов;
     GET  /metrics  — метрики в формате Prometheus (счётчики запросов,
-                     гистограмма латентности /predict).
+                     гистограмма латентности /predict, PSI дрейфа признаков);
+    GET  /drift    — JSON-отчёт дрейф-мониторинга (PSI скользящего окна
+                     входных значений age/antiguedad/renta против эталонных
+                     гистограмм обучения, см. drift.py).
 
 Предобработка вынесена в общий модуль `preprocessing.py` (CODE_REVIEW §P2.14) —
 сервис и обучение используют одни и те же функции и константы.
@@ -30,7 +33,7 @@ CODE_REVIEW §P1.10), сервис работает на legacy-констант
 с обучающим запуском.
 
 Переменные окружения: ARTIFACTS_DIR, MODEL_PATH, PARAMS_PATH, REPLACER_PATH,
-PERSONAL_RECS_PATH, LOG_LEVEL.
+PERSONAL_RECS_PATH, LOG_LEVEL, DRIFT_WINDOW_SIZE, DRIFT_MIN_SAMPLES.
 """
 
 from __future__ import annotations
@@ -52,6 +55,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
+from drift import DriftMonitor
 from preprocessing import PreprocessingParams, load_json, load_personal_recs
 from preprocessing import prepare_features as build_features
 
@@ -91,6 +95,34 @@ except ImportError:  # pragma: no cover — в прод-окружении за�
     logger.warning('prometheus_client не установлен — /metrics недоступен')
     REQUEST_COUNT = PREDICT_LATENCY = PREDICTION_COUNT = None
     METRICS_ENABLED = False
+
+
+class _DriftCollector:
+    """PSI дрейфа признаков, вычисляемый на скрейпе Prometheus.
+
+    Реализация через custom collector, а не обновление Gauge на каждый запрос:
+    пересчёт PSI (гистограмма окна) дешёв (микросекунды), но делать его на
+    каждый /predict бессмысленно — метрику читают только скрейпы. Правила
+    алертов на эту метрику — fastapi/prometheus/alerts.yml.
+    """
+
+    def __init__(self, monitor: DriftMonitor):
+        self._monitor = monitor
+
+    def collect(self):
+        from prometheus_client.core import GaugeMetricFamily
+
+        gauge = GaugeMetricFamily(
+            'bank_recommender_drift_psi',
+            'PSI скользящего окна входных значений против эталона обучения.',
+            labels=['feature'],
+        )
+        if self._monitor.enabled:
+            for feature in self._monitor.reference:
+                value = self._monitor.psi(feature)
+                if value is not None:
+                    gauge.add_metric([feature], value)
+        yield gauge
 
 
 def _observe_request(endpoint: str, status_code: int, latency: Optional[float] = None,
@@ -148,6 +180,25 @@ LABEL_MAP = dict(PARAMS.label_map)
 
 MODEL = _load_model()
 PERSONAL_RECS = load_personal_recs(PERSONAL_RECS_PATH)
+
+# Дрейф-мониторинг входных признаков (PSI против эталона обучения).
+# Эталон (`drift_reference`) появляется в preprocessing_params.json после
+# прогона актуального modeling.ipynb; без него монитор пассивен
+# (/drift вернёт status 'no_reference').
+DRIFT_MONITOR = DriftMonitor(
+    PARAMS.drift_reference,
+    window_size=int(os.getenv('DRIFT_WINDOW_SIZE', '2000')),
+    min_samples=int(os.getenv('DRIFT_MIN_SAMPLES', '200')),
+)
+if DRIFT_MONITOR.enabled:
+    logger.info('Дрейф-мониторинг активен: %s (окно %s)',
+                sorted(DRIFT_MONITOR.reference), DRIFT_MONITOR.window_size)
+    if METRICS_ENABLED:
+        from prometheus_client import REGISTRY
+
+        REGISTRY.register(_DriftCollector(DRIFT_MONITOR))
+else:
+    logger.info('Дрейф-мониторинг без эталона: /drift → no_reference')
 
 
 # --- Схемы запроса и ответа -------------------------------------------------
@@ -274,7 +325,7 @@ async def _lifespan(_: FastAPI):
 app = FastAPI(
     title='Bank product recommender',
     description='Рекомендация банковского продукта по профилю клиента (см. README.md).',
-    version='1.2.2',
+    version='1.3.0',
     lifespan=_lifespan,
 )
 
@@ -334,6 +385,18 @@ def metrics() -> Response:
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
+@app.get('/drift', summary='Дрейф-мониторинг входных признаков (PSI)')
+def drift() -> JSONResponse:
+    """PSI скользящего окна входных значений против эталона обучения.
+
+    Ответ — словарь DriftMonitor.report(): status, окно, PSI по признакам.
+    Пороги: moderate 0.1, significant 0.25 (на них же заведён алерт
+    BankRecommenderFeatureDrift в fastapi/prometheus/alerts.yml).
+    """
+    _observe_request('drift', status.HTTP_200_OK)
+    return JSONResponse(DRIFT_MONITOR.report())
+
+
 @app.post('/predict', response_model=PredictionResponse, summary='Предсказание продукта')
 def predict(profile: ClientProfile) -> PredictionResponse:
     """Скорит профиль клиента.
@@ -353,6 +416,11 @@ def predict(profile: ClientProfile) -> PredictionResponse:
             detail=f'Модель не найдена ({MODEL_PATH}). Обучение: modeling.ipynb, '
                    'сохранение: joblib.dump(model, "fastapi/saved_model.pkl")',
         )
+
+    # Дрейф-мониторинг видит сырые входные значения (None пропускаются,
+    # чтобы медианы обучения не «вымывали» сдвиг входных данных).
+    DRIFT_MONITOR.observe(age=profile.age, antiguedad=profile.antiguedad,
+                          renta=profile.renta)
 
     features = prepare_features(profile.model_dump())
     probabilities = MODEL.predict_proba(features)[0]

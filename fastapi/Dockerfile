@@ -13,7 +13,7 @@ WORKDIR /app
 COPY fastapi/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app1.py preprocessing.py ./
+COPY app1.py preprocessing.py drift.py ./
 # Артефакты обучения (создаёт modeling.ipynb). Если saved_model.pkl нет,
 # сервис всё равно поднимется: /predict ответит 503, /health — degraded.
 COPY fastapi/ ./fastapi/

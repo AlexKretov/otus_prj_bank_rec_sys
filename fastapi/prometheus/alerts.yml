@@ -1,0 +1,61 @@
+# Правила алертов микросервиса (подключаются в prometheus.yml через rule_files).
+# Закрывают пробел «алертов нет» из README («Ограничения»).
+# Alertmanager не настроен: сработки видны в UI Prometheus (Status → Alerts)
+# и через /api/v1/alerts. Для уведомлений в почту/мессенджер добавьте
+# alertmanager в docker-compose.yaml и блок alerting в prometheus.yml.
+groups:
+  - name: bank-recommender
+    rules:
+      - alert: BankRecommenderDown
+        # Сервис не отвечает на скрейпы (или контейнер упал)
+        expr: up{job="bank-recommender"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Микросервис рекомендаций недоступен"
+          description: "Prometheus не может скрейпить ml-service:8079 уже 2 минуты."
+
+      - alert: BankRecommenderHighLatencyP95
+        # p95 /predict выше 2 с в течение 10 минут (SLO нагрузочного теста — 5 с)
+        expr: |
+          histogram_quantile(0.95,
+            sum(rate(bank_recommender_predict_latency_seconds_bucket[5m])) by (le)
+          ) > 2
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "p95 латентности /predict выше 2 с"
+          description: "p95 за последние 5 минут превышает 2 с в течение 10 минут подряд."
+
+      - alert: BankRecommenderHighErrorRate
+        # доля 5xx по всем эндпоинтам выше 1% в течение 10 минут
+        expr: |
+          sum(rate(bank_recommender_requests_total{status=~"5.."}[5m]))
+            /
+          sum(rate(bank_recommender_requests_total[5m])) > 0.01
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Доля ответов 5xx выше 1%"
+          description: >
+            Ошибки /predict и других эндпоинтов растут — проверьте логи сервиса
+            и наличие артефактов (saved_model.pkl → 503).
+
+      - alert: BankRecommenderFeatureDrift
+        # PSI скользящего окна входных значений против эталона обучения > 0.25
+        # (порог «significant» из drift.py); метрика появляется после прогона
+        # актуального modeling.ipynb (секция drift_reference) и минимального
+        # окна наблюдений (DRIFT_MIN_SAMPLES, по умолчанию 200).
+        expr: max(bank_recommender_drift_psi) > 0.25
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Значительный дрейф входных признаков"
+          description: >
+            PSI хотя бы одного признака (age/antiguedad/renta) выше 0.25
+            в течение 30 минут — распределение входного трафика уехало
+            от обучающего. Детали: GET /drift на ml-service:8079.
