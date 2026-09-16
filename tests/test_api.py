@@ -1,5 +1,7 @@
 """Тесты HTTP-сервиса: happy path, валидация, деградация (CODE_REVIEW §P2.16)."""
 
+import json
+
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -7,6 +9,19 @@ from fastapi.testclient import TestClient
 import app1
 from preprocessing import PreprocessingParams
 from tests.conftest import make_profile
+
+
+def _post_raw_json(client, payload):
+    """POST сырым телом через `json.dumps` — как шлёт профили test.ipynb.
+
+    У `json.dumps` по умолчанию `allow_nan=True`, поэтому пандасовские пропуски
+    уезжают JSON-токенами `NaN`/`Infinity`, а не `null`.
+    """
+    return client.post(
+        '/predict',
+        content=json.dumps(payload),
+        headers={'Content-Type': 'application/json'},
+    )
 
 
 @pytest.fixture()
@@ -81,6 +96,62 @@ def test_predict_ignores_extra_fields(patched_service):
 def test_predict_missing_ncodpers_is_422(patched_service):
     response = patched_service.post('/predict', json={'age': 30})
     assert response.status_code == 422
+
+
+def test_predict_nan_in_string_fields_is_missing_not_422(patched_service):
+    """NaN в строковых полях (пандасовские пропуски из test.ipynb) → 200, а не 422."""
+    profile = make_profile()
+    profile['sexo'] = float('nan')
+    profile['tiprel_1mes'] = float('nan')
+    profile['canal_entrada'] = float('nan')
+    profile['nomprov'] = float('nan')
+    response = _post_raw_json(patched_service, profile)
+    assert response.status_code == 200
+    assert isinstance(response.json()['prediction'], int)
+
+
+def test_predict_non_finite_in_numeric_fields_is_missing(patched_service):
+    """NaN/±Infinity в числовых полях закрываются медианами обучения → 200."""
+    profile = make_profile(age=float('nan'), renta=float('inf'), antiguedad=float('-inf'))
+    assert _post_raw_json(patched_service, profile).status_code == 200
+
+
+def test_predict_nan_profile_matches_none_profile(patched_service):
+    """NaN семантически равен отсутствию значения: ответы совпадают с None-профилем."""
+    nan_profile = make_profile(sexo=float('nan'), age=float('nan'), renta=float('nan'))
+    none_profile = make_profile(sexo=None, age=None, renta=None)
+    nan_response = _post_raw_json(patched_service, nan_profile)
+    none_response = patched_service.post('/predict', json=none_profile)
+    assert nan_response.status_code == none_response.status_code == 200
+    assert nan_response.json()['prediction'] == none_response.json()['prediction']
+    assert nan_response.json()['confidence'] == pytest.approx(none_response.json()['confidence'])
+
+
+def test_validation_error_containing_nan_is_422_not_500(patched_service):
+    """Заведомо битое тело с NaN: 422 с валидным JSON, а не 500.
+
+    Регрессия: стоковый обработчик 422 падал с
+    `ValueError: Out of range float values are not JSON compliant`, т.к. клал
+    сырой `input` (NaN) в тело через `json.dumps(allow_nan=False)`.
+    """
+    response = patched_service.post(
+        '/predict',
+        content='NaN',  # тело вообще не объект — input ошибки и есть NaN
+        headers={'Content-Type': 'application/json'},
+    )
+    assert response.status_code == 422
+    assert 'detail' in response.json()
+
+
+def test_validation_error_nested_nan_is_422_not_500(patched_service):
+    """NaN внутри значения неверного типа тоже не должен ронять сериализацию 422."""
+    response = patched_service.post(
+        '/predict',
+        content='{"ncodpers": 1001, "age": {"nested": NaN}}',
+        headers={'Content-Type': 'application/json'},
+    )
+    assert response.status_code == 422
+    assert 'detail' in response.json()
 
 
 def test_predict_without_model_is_503(monkeypatch, tiny_personal_recs):
