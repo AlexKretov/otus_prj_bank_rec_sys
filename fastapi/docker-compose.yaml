@@ -31,6 +31,8 @@ services:
       - "${PROMETHEUS_PORT:-9090}:9090"
     volumes:
       - "./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+      # правила алертов (BankRecommenderDown/HighLatency/HighErrorRate/FeatureDrift)
+      - "./prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro"
     depends_on:
       - ml_service
     hostname: prometheus

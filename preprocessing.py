@@ -126,6 +126,7 @@ class PreprocessingParams:
     replacer: Dict[str, Dict[str, str]] = field(default_factory=dict)
     label_map: Dict[int, str] = field(default_factory=dict)
     feature_columns: Dict[str, List[str]] = field(default_factory=dict)
+    drift_reference: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
     source: str = 'legacy-константы'
 
@@ -154,6 +155,7 @@ class PreprocessingParams:
             replacer=payload.get('replacer') or {},
             label_map={int(code): name for code, name in (payload.get('label_map') or {}).items()},
             feature_columns=payload.get('feature_columns') or {},
+            drift_reference=payload.get('drift_reference'),
             created_at=payload.get('created_at'),
             source=source,
         )
@@ -317,20 +319,35 @@ def fold_rare_categories(df: pd.DataFrame, replacer: Dict[str, Dict[str, str]],
                          columns: Optional[List[str]] = None) -> pd.DataFrame:
     """Сворачивает редкие категории в 'other' по словарю из обучения.
 
-    Эквивалент поколоночного `df[col].replace(replacer[col])`, но без его
-    медленного пути: `replace` на float-колонках со строковыми ключами
-    (cod_prov и др.) гоняет покоординатные сравнения с попытками коерсии
-    (~1 мс на колонку на однострочном фрейме запроса). Здесь замена делается
-    только там, где значение реально есть в словаре. Пустые словари —
-    тождественное преобразование — пропускаются.
+    Ключи словаря, сгенерированного при обучении, — строки (на обучении
+    колонки приводились к str до подсчёта частот). Поэтому для словарей со
+    строковыми ключами сравнение ведём в строковом домене: значения колонки
+    приводятся к str, и float `28.0` из запроса матчится с ключом `'28.0'`
+    ровно так же, как на обучении. Раньше сравнение шло в исходном домене,
+    и float-значения не матчились со строковыми ключами — редкие `cod_prov`,
+    `ind_nuevo` и т.п. на проде не сворачивались (train/serve skew:
+    OHE с handle_unknown='ignore' молча занулял такие категории).
+    Словари с нестроковыми ключами (ручные/тестовые) обрабатываются
+    в исходном (числовом) домене — прежнее поведение.
+
+    Пустые словари — тождественное преобразование — пропускаются.
     """
     for col in CATEGORICAL_COLUMNS if columns is None else columns:
         mapping = replacer.get(col)
         if not mapping or col not in df.columns:
             continue
-        rare_mask = df[col].isin(mapping)
+        if all(isinstance(key, str) for key in mapping):
+            values = df[col].astype(str)
+            rare_mask = values.isin(mapping)
+        else:  # числовые ключи: сравниваем в исходном домене
+            values = df[col]
+            rare_mask = values.isin(mapping)
         if rare_mask.any():
-            df.loc[rare_mask, col] = df.loc[rare_mask, col].map(mapping)
+            if isinstance(df[col].dtype, pd.CategoricalDtype):
+                # присвоение 'other' в category-dtype упало бы: значения нет
+                # в категориях — переводим колонку в object
+                df[col] = df[col].astype(object)
+            df.loc[rare_mask, col] = values[rare_mask].map(mapping)
     return df
 
 
@@ -391,12 +408,20 @@ def manual_transformations(df: pd.DataFrame,
                            ) -> tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
     """Ручные и агрегатные признаки.
 
-    На обучении (`aggregates=None`) групповые статистики считаются по всему
-    датасету и возвращаются для сериализации в `preprocessing_params.json`.
-    На проде сохранённые агрегаты применяются через `map` — иначе статистики
-    считались бы по одной строке запроса (CODE_REVIEW §2.4). Если переданных
-    агрегатов не хватает (legacy-режим без артефакта), недостающие считаются
-    по входному фрейму — для одной строки это вырожденный, но рабочий режим.
+    На обучении (`aggregates=None`) групповые статистики считаются по
+    переданному фрейму (modeling.ipynb передаёт train-часть — без утечки из
+    теста, CODE_REVIEW §3.4) и возвращаются для сериализации в
+    `preprocessing_params.json`. На проде сохранённые агрегаты применяются
+    через `map` — иначе статистики считались бы по одной строке запроса
+    (CODE_REVIEW §2.4). Если переданных агрегатов не хватает (legacy-режим
+    без артефакта), недостающие считаются по входному фрейму — для одной
+    строки это вырожденный, но рабочий режим.
+
+    В каждый словарь агрегатов при обучении добавляется ключ '__default__' —
+    глобальная статистика по train-фрейму. При apply категория, которой не
+    было при обучении, маппится в '__default__', а не в NaN: иначе тестовый
+    (или продовый) клиент с невиданной категорией получал бы NaN в числовых
+    признаках, на которых RandomForest падает.
 
     Новые колонки добавляются одним `concat` (порядок ключей = прежний порядок
     присваиваний, чтобы порядок колонок не изменился): поколоночные
@@ -410,8 +435,16 @@ def manual_transformations(df: pd.DataFrame,
         renta_key = f'mean_renta_by_{col}'
         antiguedad_key = f'median_antiguedad_by_{col}'
         if stored.get(renta_key) and stored.get(antiguedad_key):
-            extras[renta_key] = df[col].map(stored[renta_key]).astype(float)
-            extras[antiguedad_key] = df[col].map(stored[antiguedad_key]).astype(float)
+            renta_default = stored[renta_key].get('__default__')
+            if renta_default is None:  # агрегаты от старого запуска без fallback
+                renta_default = float(np.mean(list(stored[renta_key].values())))
+            antiguedad_default = stored[antiguedad_key].get('__default__')
+            if antiguedad_default is None:
+                antiguedad_default = float(np.mean(list(stored[antiguedad_key].values())))
+            extras[renta_key] = (df[col].map(stored[renta_key])
+                                 .astype(float).fillna(renta_default))
+            extras[antiguedad_key] = (df[col].map(stored[antiguedad_key])
+                                      .astype(float).fillna(antiguedad_default))
         else:
             if aggregates is not None:
                 logger.warning('Агрегаты для %s не найдены в параметрах — считаю по входным '
@@ -423,8 +456,17 @@ def manual_transformations(df: pd.DataFrame,
             stored[antiguedad_key] = {
                 str(cat): float(val)
                 for cat, val in df.groupby(col)['antiguedad'].median().items()}
-            extras[renta_key] = df[col].map(stored[renta_key]).astype(float)
-            extras[antiguedad_key] = df[col].map(stored[antiguedad_key]).astype(float)
+            # fallback для категорий, которых не было при обучении:
+            # глобальная статистика колонки по train-фрейму
+            stored[renta_key]['__default__'] = float(df['renta'].mean())
+            stored[antiguedad_key]['__default__'] = float(df['antiguedad'].median())
+            extras[renta_key] = (df[col].map(stored[renta_key])
+                                 .astype(float)
+                                 .fillna(stored[renta_key]['__default__']))
+            extras[antiguedad_key] = (
+                df[col].map(stored[antiguedad_key])
+                .astype(float)
+                .fillna(stored[antiguedad_key]['__default__']))
     extras['renta_vs_country_mean'] = df['renta'] / extras['mean_renta_by_pais_residencia']
     df = pd.concat([df, pd.DataFrame(extras, index=df.index)], axis=1)
     return df, stored
@@ -495,12 +537,290 @@ def feature_engineering(df: pd.DataFrame,
     return df.loc[:, ~df.columns.duplicated()], aggregates_out
 
 
+# --- Обучение параметров предобработки (train-only, CODE_REVIEW §3.4) --------
+# Производные/служебные колонки: в сворачивании редких категорий и модах
+# не участвуют (в старом ноутбучном пайплайне список категориальных колонок
+# фиксировался до их появления — сохраняем то поведение).
+_DERIVED_COLUMNS = frozenset({'age_interval', 'total_products', 'recommended_product_id'})
+
+# Числовые колонки с медианами и квантильным клиппингом.
+_MEDIAN_COLUMNS = ('age', 'antiguedad', 'renta')
+
+# Идентификатор и дата среза: не категории и не медианные числовые.
+_MODES_EXCLUDED = frozenset({'age', 'antiguedad', 'fecha_dato', 'ncodpers', 'renta'})
+
+
+def calculate_age_intervals(df: pd.DataFrame, n_intervals: int = 3) -> list:
+    """Возрастные корзины по кумулятивному распределению продуктов.
+
+    Перенесено из modeling.ipynb без изменений: границы подбираются так,
+    чтобы в каждый интервал попадала ~1/n_intervals суммарных продуктов.
+    Ожидает колонки `age` и `total_products`.
+    """
+    age_groups = df.groupby('age', observed=True)['total_products'].sum().reset_index()
+    age_groups = age_groups.sort_values('age')
+
+    cum_products = np.cumsum(age_groups['total_products'].values)
+    total = cum_products[-1]
+    step = total / n_intervals
+
+    targets = np.arange(1, n_intervals) * step
+    idxs = np.searchsorted(cum_products, targets, side='right')
+    upper_ages = age_groups['age'].values[np.minimum(idxs, len(age_groups) - 1)]
+
+    intervals = []
+    lower = age_groups['age'].iloc[0]
+    for upper in upper_ages:
+        intervals.append((lower, upper))
+        lower = upper + 1
+    intervals.append((lower, age_groups['age'].iloc[-1]))
+    return intervals
+
+
+def create_time_cohorts(series: pd.Series, max_cohorts: int = 30) -> tuple:
+    """Возвращает (метки когорт, спецификация когорт для сервиса).
+
+    Перенесено из modeling.ipynb без изменений. Спецификация описывает
+    границы когорт в днях от base_date, чтобы сервис применял ровно те же
+    интервалы, что и обучение (CODE_REVIEW §2.2, §P1.10): интервал i
+    покрывает (left_days, right_days], где left_days — правый день
+    предыдущего бина, right_days — максимальный день бина.
+    """
+    series_dt = pd.to_datetime(series)
+    base_date = series_dt.min().normalize()
+
+    # Вычисляем дни относительно базовой даты
+    days = (series_dt.dt.normalize() - base_date).dt.days
+
+    # Определяем оптимальное количество когорт
+    unique_days = days.unique()
+    n_cohorts = min(max_cohorts, len(unique_days))
+
+    # Создаем интервалы через qcut (быстрее чем apply)
+    try:
+        qbins = pd.qcut(days, q=n_cohorts, precision=0, duplicates='drop')
+    except ValueError:
+        return series_dt.dt.strftime('%Y-%m-%d').astype('str'), {'mode': 'raw'}
+
+    # Генерируем строковые метки для всех интервалов сразу
+    interval_labels = [
+        f"{(base_date + pd.Timedelta(days=int(iv.left))).strftime('%Y-%m-%d')}"
+        f" – {(base_date + pd.Timedelta(days=int(iv.right))).strftime('%Y-%m-%d')}"
+        for iv in qbins.cat.categories
+    ]
+
+    # Маппинг категорий на строки через векторные операции
+    label_map = dict(zip(qbins.cat.categories, interval_labels))
+    cohort_labels = qbins.cat.rename_categories(label_map).astype('str')
+
+    # Границы для сервиса берем по фактическому распределению дней по бинам:
+    # так спецификация воспроизводит обучающие метки один в один
+    codes = qbins.cat.codes.to_numpy()
+    days_np = days.to_numpy()
+    rights = [int(days_np[codes == i].max()) for i in range(len(interval_labels))]
+    lefts = [int(days_np[codes == 0].min()) - 1] + rights[:-1]
+    missing_label = str(cohort_labels[days.isna()].iloc[0]) if days.isna().any() else 'unknown'
+    spec = {
+        'mode': 'intervals',
+        'base_date': base_date.strftime('%Y-%m-%d'),
+        'closed': 'right',
+        'missing_label': missing_label,
+        'intervals': [
+            {'left_days': left, 'right_days': right, 'label': label}
+            for left, right, label in zip(lefts, rights, interval_labels)
+        ],
+    }
+
+    return cohort_labels, spec
+
+
+def count_cohort_mismatches(raw_dates: pd.Series, cohorts: pd.Series,
+                            spec: Dict[str, Any]) -> int:
+    """Сколько обучающих меток не воспроизводит сервисная спецификация когорт.
+
+    Векторная проверка из modeling.ipynb: интервалы отсортированы и не
+    пересекаются, поэтому сводится к одному pd.cut вместо построчного map.
+    """
+    base_date = pd.Timestamp(spec['base_date']).normalize()
+    parsed = pd.to_datetime(raw_dates, errors='coerce')
+    days = (parsed.dt.normalize() - base_date).dt.days
+
+    bins = [spec['intervals'][0]['left_days']] + [iv['right_days'] for iv in spec['intervals']]
+    labels = [iv['label'] for iv in spec['intervals']]
+
+    restored = pd.cut(days, bins=bins, labels=labels, right=True).astype(object)
+    restored[days.isna()] = spec.get('missing_label', 'unknown')
+    return int((restored.astype(str).to_numpy() != cohorts.astype(str).to_numpy()).sum())
+
+
+def compute_drift_reference(df: pd.DataFrame, columns=_MEDIAN_COLUMNS,
+                            n_bins: int = 10) -> Dict[str, Any]:
+    """Эталонные гистограммы входных числовых признаков для дрейф-мониторинга.
+
+    Децили распределения train: сервис (`drift.DriftMonitor`) считает PSI
+    скользящего окна запросов против этих бинов. Пропуски и сентинель стажа
+    -999999 игнорируются (ожидается фрейм после coerce_numeric).
+    """
+    reference = {}
+    for col in columns:
+        if col not in df.columns:
+            continue
+        values = pd.to_numeric(df[col], errors='coerce')
+        values = values.replace(np.float64(-999999.0), np.nan).dropna()
+        if values.nunique() < 2:
+            continue
+        edges = np.unique(
+            values.quantile(np.linspace(0.0, 1.0, n_bins + 1)).to_numpy(dtype=float))
+        if len(edges) < 3:  # гистограмма из 1-2 бинов неинформативна
+            continue
+        edges[0], edges[-1] = -np.inf, np.inf
+        counts, _ = np.histogram(values.to_numpy(dtype=float), bins=edges)
+        reference[col] = {
+            'edges': [float(edge) for edge in edges],
+            'shares': (counts / counts.sum()).tolist(),
+        }
+    return reference
+
+
+def fit_preprocessing_params(fit_df: pd.DataFrame, *, rare_threshold: float = 0.01,
+                             n_age_intervals: int = 9, max_cohorts: int = 12,
+                             clip_quantiles: tuple = (0.01, 0.96),
+                             drift_columns=_MEDIAN_COLUMNS,
+                             drift_bins: int = 10) -> PreprocessingParams:
+    """Обучает статистики предобработки на train-части (без утечки из теста).
+
+    Раньше медианы, моды, квантили клиппинга, наборы редких категорий, когорты
+    дат и возрастные бины считались по ВСЕМУ датасету до сплита — умеренная,
+    но реальная утечка (CODE_REVIEW §3.4). Теперь fit выполняется только на
+    train, а test трансформируется `apply_preprocessing` с теми же параметрами —
+    тем самым сохраняется train/serve-согласованность: и обучение, и прод
+    проходят один и тот же кодовый путь.
+
+    Колонку таргета (`purchase`) функция удаляет, если она есть во фрейме:
+    таргет не должен влиять на статистики. Агрегаты (`mean_renta_by_*` и др.)
+    здесь не считаются — они обучаются в `feature_engineering` на train-части.
+    """
+    df = coerce_numeric(fit_df.copy())
+    df = df.drop(columns=['purchase'], errors='ignore')
+
+    medians = {col: float(df[col].median()) for col in _MEDIAN_COLUMNS if col in df.columns}
+    modes_columns = [col for col in df.columns
+                     if col not in _MODES_EXCLUDED and col not in _DERIVED_COLUMNS]
+    modes = {}
+    for col in modes_columns:
+        mode = df[col].mode(dropna=True)
+        if not mode.empty:
+            modes[col] = mode.iloc[0]
+
+    # Порядок повторяет старый обучающий пайплайн и прод: fillna → бины
+    # возраста → когорты дат → сворачивание редких категорий → клиппинг.
+    work = fill_missing(df, medians, modes)
+
+    products_present = [product for product in PRODUCTS if product in work.columns]
+    if not products_present or 'age' not in work.columns:
+        raise ValueError('для возрастных интервалов нужны колонки age и продуктовые флаги')
+    work = add_total_products(work, products_present)
+    age_intervals = calculate_age_intervals(work, n_age_intervals)
+    work = add_age_interval(work, age_intervals)
+
+    date_cohorts = {}
+    for col in ('fecha_alta', 'ult_fec_cli_1t'):
+        if col not in work.columns:
+            continue
+        raw_dates = work[col].copy()  # моды уже подставлены — как при обучении
+        cohorts, spec = create_time_cohorts(work[col], max_cohorts=max_cohorts)
+        work[col] = cohorts.to_numpy()
+        date_cohorts[col] = spec
+        if spec.get('mode') == 'intervals':
+            mismatches = count_cohort_mismatches(raw_dates, cohorts, spec)
+            if mismatches:
+                logger.warning('Спецификация когорт %s не воспроизводит %s значений '
+                               'обучения', col, mismatches)
+
+    # Редкие категории: как при обучении — частоты считаются в строковом
+    # домене (astype(str)), продуктовые флаги не сворачиваются.
+    replacer_columns = [col for col in modes_columns if col not in PRODUCTS]
+    replacer = {}
+    for col in replacer_columns:
+        as_str = work[col].astype(str)
+        counts = as_str.value_counts(normalize=True)
+        rare_values = counts[counts < rare_threshold].index
+        replacer[col] = {str(value): 'other' for value in rare_values}
+
+    clip_bounds = {}
+    lower_q, upper_q = clip_quantiles
+    for col in ('renta', 'antiguedad'):
+        if col in work.columns:
+            clip_bounds[col] = [float(work[col].quantile(lower_q)),
+                                float(work[col].quantile(upper_q))]
+
+    return PreprocessingParams(
+        medians=medians,
+        modes=modes,
+        clip_bounds=clip_bounds,
+        age_intervals=[[int(lower), int(upper)] for lower, upper in age_intervals],
+        date_cohorts=date_cohorts,
+        replacer=replacer,
+        drift_reference=compute_drift_reference(df, drift_columns, drift_bins),
+        source='fit(train)',
+    )
+
+
+def apply_preprocessing(df: pd.DataFrame, params: PreprocessingParams) -> pd.DataFrame:
+    """Трансформирует батч профилей параметрами обучающего запуска.
+
+    Тот же кодовый путь и порядок шагов, что в `prepare_features` на проде
+    (кроме ALS-рекомендации: здесь колонка `recommended_product_id` ожидается
+    уже подмёргнутой, а на проде её добавляет `add_personal_recommendation`).
+    """
+    df = coerce_numeric(df)
+    df = fill_missing(df, params.medians, params.modes)
+    if 'age' in df.columns:
+        df = add_age_interval(df, params.age_intervals)
+    df = add_date_cohorts(df, params.date_cohorts, params.date_intervals)
+    df = fold_rare_categories(df, params.replacer)
+    df = clip_numbers(df, params.clip_bounds)
+    if all(product in df.columns for product in PRODUCTS):
+        df = add_total_products(df)
+    return df
+
+
+def temporal_split(dates: pd.Series, test_size: float = 0.3) -> tuple:
+    """Временное разбиение по датам: train — значения ≤ cutoff, test — позже.
+
+    Возвращает (cutoff, train_mask, test_mask). modeling.ipynb разбивает по дате
+    привлечения клиента (`fecha_alta`): train — старые клиенты, test — новые.
+    По дате среза (`fecha_dato` последнего наблюдения) разбивать нельзя: посадив
+    в train клиентов с ранней последней датой, мы получили бы почти одних
+    ушедших из банка клиентов с таргетом 0 (проверено экспериментально).
+    NaT уезжает в train. В отличие от стратифицированного сплита здесь нет
+    «подглядывания в будущее», и профили одного клиента не смешиваются
+    (CODE_REVIEW §3.4).
+    """
+    normalized = pd.to_datetime(pd.Series(dates)).dt.normalize()
+    unique_dates = np.sort(normalized.dropna().unique())
+    if len(unique_dates) < 2:
+        raise ValueError('временное разбиение невозможно: '
+                         'нужно минимум 2 различные даты среза')
+    cutoff = pd.Timestamp(normalized.quantile(1 - test_size)).normalize()
+    test_mask = normalized > cutoff
+    if not test_mask.any() or test_mask.all():
+        # Распределение дат вырождено (квантиль попал на край): берём
+        # ближайшую реальную дату, чтобы обе части были непусты
+        index = int(round((1 - test_size) * (len(unique_dates) - 1)))
+        index = min(max(index, 0), len(unique_dates) - 2)
+        cutoff = pd.Timestamp(unique_dates[index])
+        test_mask = normalized > cutoff
+    return cutoff, ~test_mask, test_mask
+
+
 def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
                      personal_recs: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Превращает профиль клиента в матрицу признаков той же формы, что и на обучении.
 
     Порядок шагов повторяет обучение (CODE_REVIEW §2.1): сначала fillna
-    медиан/мод, и только потом — возрастные бины и когорты дат.
+    медиан/мод, и только потом — возрастные бины и когорты дат. Базовые
+    трансформации общие для прода и обучения — `apply_preprocessing`.
     Бросает ValueError, если в профиле нет обязательных колонок.
     """
     row = pd.DataFrame([profile])
@@ -515,14 +835,8 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
     if missing_inputs:
         raise ValueError(f'В профиле не хватает обязательных полей: {missing_inputs}')
 
-    row = coerce_numeric(row)
-    row = fill_missing(row, params.medians, params.modes)
-    row = add_age_interval(row, params.age_intervals)
-    row = add_date_cohorts(row, params.date_cohorts, params.date_intervals)
-    row = fold_rare_categories(row, params.replacer)
-    row = clip_numbers(row, params.clip_bounds)
+    row = apply_preprocessing(row, params)
     row = add_personal_recommendation(row, personal_recs)
-    row = add_total_products(row)
     row = row[BASE_COLUMNS]
 
     row['antiguedad'] = row['antiguedad'].astype(int)
@@ -530,21 +844,31 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
     # приведений к category только добавляли латентности
     row, _ = feature_engineering(row, params.aggregates or None, cast_categories=False)
 
+    # Списки числовых/категориальных признаков — из артефакта этого же запуска
+    # (автодетект в modeling.ipynb зависит от данных: число уникальных значений
+    # числовой колонки может упасть ниже 25, и она станет категориальной).
+    # Раньше здесь стояли зашитые константы прошлого запуска — после
+    # переобучения с другим автоходом детектом сервис приводил типы иначе,
+    # чем модель (train/serve skew, TypeError в OneHotEncoder).
+    feature_columns = params.feature_columns or {}
+    numeric_features = feature_columns.get('numeric') or NUMERIC_FEATURES
+    categorical_features = feature_columns.get('categorical') or CATEGORICAL_FEATURES
+
     # Приведение признаков к итоговым типам — батчем, а не по колонке
     # (каждое поколоночное присваивание в pandas копирует блоки данных).
     # Числовые, уже приведённые к float на предыдущих шагах, не трогаем —
     # to_numeric по ним тождественен.
     numeric_needs_cast = [
-        col for col in NUMERIC_FEATURES
+        col for col in numeric_features
         if col in row.columns and not pd.api.types.is_numeric_dtype(row[col])
     ]
     if numeric_needs_cast:
         row[numeric_needs_cast] = row[numeric_needs_cast].apply(pd.to_numeric, errors='coerce')
-    categorical_present = [col for col in CATEGORICAL_FEATURES if col in row.columns]
+    categorical_present = [col for col in categorical_features if col in row.columns]
     if categorical_present:
         row[categorical_present] = row[categorical_present].astype('str')
 
-    expected = set(NUMERIC_FEATURES) | set(CATEGORICAL_FEATURES)
+    expected = set(numeric_features) | set(categorical_features)
     absent = sorted(expected - set(row.columns))
     if absent:
         logger.error('В матрице признаков нет колонок модели: %s', absent)

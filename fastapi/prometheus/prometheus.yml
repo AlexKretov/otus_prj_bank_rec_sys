@@ -5,6 +5,11 @@ global:
   evaluation_interval: 15s
   scrape_timeout: 10s
 
+# Правила алертов — fastapi/prometheus/alerts.yml (монтируется из compose).
+# Alertmanager не настроен: сработки видны в UI Prometheus (Status → Alerts).
+rule_files:
+  - /etc/prometheus/alerts.yml
+
 scrape_configs:
   - job_name: 'bank-recommender'
     metrics_path: /metrics
