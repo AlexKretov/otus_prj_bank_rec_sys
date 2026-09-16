@@ -1,0 +1,15 @@
+# Автоматическая загрузка дашбордов из /var/lib/grafana/dashboards
+# (docker compose маунтит туда fastapi/grafana.json). Без этого файла
+# Grafana поднимается пустой — дашборд приходилось импортировать руками.
+apiVersion: 1
+
+providers:
+  - name: bank-recommender
+    folder: ''
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

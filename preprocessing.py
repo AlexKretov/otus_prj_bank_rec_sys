@@ -5,9 +5,9 @@
 источник истины: обучение (`modeling.ipynb`) и сервис (`app1.py`) используют
 одни и те же функции и константы, поэтому train/serve skew исключён по построению.
 
-Импорт модуля лёгкий: тяжёлые `featuretools`/`woodwork` подтягиваются лениво
-внутри `feature_engineering`, поэтому чистые функции (бины, когорты, клиппинг,
-сворачивание редких категорий) можно использовать и тестировать без них.
+Импорт модуля лёгкий: чистые функции (бины, когорты, клиппинг, сворачивание
+редких категорий, арифметика `feature_engineering`) работают на одном
+pandas/numpy и не тянут тяжёлых зависимостей.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -197,6 +198,17 @@ def load_personal_recs(path: Path) -> Optional[pd.DataFrame]:
     return recs
 
 
+@lru_cache(maxsize=None)
+def _parse_interval_bounds(interval: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Границы legacy-интервала 'YYYY-MM-DD – YYYY-MM-DD', разобранные один раз.
+
+    Без кэша find_interval парсил по 24 строки дат на каждое значение —
+    на инференсе это ~8 мс на запрос только на парсинг.
+    """
+    start_str, end_str = interval.split(' – ')
+    return pd.Timestamp(start_str), pd.Timestamp(end_str)
+
+
 def find_interval(input_date: Any, intervals: List[str]) -> Optional[str]:
     """Legacy-маппинг даты в интервал вида 'YYYY-MM-DD – YYYY-MM-DD'.
 
@@ -210,9 +222,7 @@ def find_interval(input_date: Any, intervals: List[str]) -> Optional[str]:
         return None
 
     for interval in intervals:
-        start_str, end_str = interval.split(' – ')
-        start_date = pd.to_datetime(start_str)
-        end_date = pd.to_datetime(end_str)
+        start_date, end_date = _parse_interval_bounds(interval)
         if start_date <= parsed <= end_date:
             return interval
     return None
@@ -254,13 +264,25 @@ def coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
 
 def fill_missing(df: pd.DataFrame, medians: Dict[str, float],
                  modes: Dict[str, Any]) -> pd.DataFrame:
-    """Пропуски числовых — медианами, категориальных — модами (порядок как при обучении)."""
+    """Пропуски числовых — медианами, категориальных — модами (порядок как при обучении).
+
+    Заполняются только колонки, в которых реально есть пропуски: ~40 безусловных
+    `fillna` на однострочном фрейме запроса стоили заметной доли латентности
+    (каждый вызов pandas — это копирование блока). Значения те же: `fillna(dict)`
+    внутри pandas заполняет колонки по одной, как и прежний цикл.
+    """
+    if df.empty:
+        return df
+    with_missing = set(df.columns[df.isna().any(axis=0)])
+    fills: Dict[str, Any] = {}
     for col in ('age', 'antiguedad', 'renta'):
-        if col in df.columns:
-            df[col] = df[col].fillna(medians.get(col, LEGACY_MEDIANS[col]))
+        if col in df.columns and col in with_missing:
+            fills[col] = medians.get(col, LEGACY_MEDIANS[col])
     for col, value in modes.items():
-        if col in df.columns:
-            df[col] = df[col].fillna(value)
+        if col in df.columns and col in with_missing:
+            fills[col] = value
+    if fills:
+        df = df.fillna(fills)
     return df
 
 
@@ -293,11 +315,22 @@ def add_date_cohorts(df: pd.DataFrame, date_cohorts: Dict[str, Any],
 
 def fold_rare_categories(df: pd.DataFrame, replacer: Dict[str, Dict[str, str]],
                          columns: Optional[List[str]] = None) -> pd.DataFrame:
-    """Сворачивает редкие категории в 'other' по словарю из обучения."""
+    """Сворачивает редкие категории в 'other' по словарю из обучения.
+
+    Эквивалент поколоночного `df[col].replace(replacer[col])`, но без его
+    медленного пути: `replace` на float-колонках со строковыми ключами
+    (cod_prov и др.) гоняет покоординатные сравнения с попытками коерсии
+    (~1 мс на колонку на однострочном фрейме запроса). Здесь замена делается
+    только там, где значение реально есть в словаре. Пустые словари —
+    тождественное преобразование — пропускаются.
+    """
     for col in CATEGORICAL_COLUMNS if columns is None else columns:
-        if col in df.columns and col in replacer:
-            # replace, а не map: в словаре только редкие значения (CODE_REVIEW §1.4)
-            df[col] = df[col].replace(replacer[col])
+        mapping = replacer.get(col)
+        if not mapping or col not in df.columns:
+            continue
+        rare_mask = df[col].isin(mapping)
+        if rare_mask.any():
+            df.loc[rare_mask, col] = df.loc[rare_mask, col].map(mapping)
     return df
 
 
@@ -341,9 +374,15 @@ def add_personal_recommendation(df: pd.DataFrame,
 
 def add_total_products(df: pd.DataFrame, products: Optional[List[str]] = None) -> pd.DataFrame:
     """Число продуктов клиента — сумма флагов владения."""
-    for product in PRODUCTS if products is None else products:
-        df[product] = pd.to_numeric(df[product], errors='coerce')
-    df['total_products'] = df[PRODUCTS if products is None else products].sum(axis=1)
+    columns = PRODUCTS if products is None else products
+    if all(pd.api.types.is_numeric_dtype(df[col]) for col in columns):
+        # типичный путь API: pydantic приводит флаги к float — to_numeric по ним
+        # тождествен, писать назад нечего (экономит ~7 мс на запросе)
+        df['total_products'] = df[columns].sum(axis=1)
+        return df
+    converted = df[columns].apply(pd.to_numeric, errors='coerce')
+    df[columns] = converted
+    df['total_products'] = converted.sum(axis=1)
     return df
 
 
@@ -358,17 +397,21 @@ def manual_transformations(df: pd.DataFrame,
     считались бы по одной строке запроса (CODE_REVIEW §2.4). Если переданных
     агрегатов не хватает (legacy-режим без артефакта), недостающие считаются
     по входному фрейму — для одной строки это вырожденный, но рабочий режим.
-    """
-    df['renta_antiguedad_ratio'] = df['renta'] / (df['antiguedad'] + 1)
-    df['log_renta'] = np.log1p(df['renta'])
 
+    Новые колонки добавляются одним `concat` (порядок ключей = прежний порядок
+    присваиваний, чтобы порядок колонок не изменился): поколоночные
+    присваивания на однострочном фрейме запроса стоят ~1 мс каждое.
+    """
     stored = dict(aggregates) if aggregates else {}
+    extras: Dict[str, pd.Series] = {}
+    extras['renta_antiguedad_ratio'] = df['renta'] / (df['antiguedad'] + 1)
+    extras['log_renta'] = np.log1p(df['renta'])
     for col in ('pais_residencia', 'segmento'):
         renta_key = f'mean_renta_by_{col}'
         antiguedad_key = f'median_antiguedad_by_{col}'
         if stored.get(renta_key) and stored.get(antiguedad_key):
-            df[renta_key] = df[col].map(stored[renta_key]).astype(float)
-            df[antiguedad_key] = df[col].map(stored[antiguedad_key]).astype(float)
+            extras[renta_key] = df[col].map(stored[renta_key]).astype(float)
+            extras[antiguedad_key] = df[col].map(stored[antiguedad_key]).astype(float)
         else:
             if aggregates is not None:
                 logger.warning('Агрегаты для %s не найдены в параметрах — считаю по входным '
@@ -380,58 +423,75 @@ def manual_transformations(df: pd.DataFrame,
             stored[antiguedad_key] = {
                 str(cat): float(val)
                 for cat, val in df.groupby(col)['antiguedad'].median().items()}
-            df[renta_key] = df[col].map(stored[renta_key]).astype(float)
-            df[antiguedad_key] = df[col].map(stored[antiguedad_key]).astype(float)
-
-    df['renta_vs_country_mean'] = df['renta'] / df['mean_renta_by_pais_residencia']
+            extras[renta_key] = df[col].map(stored[renta_key]).astype(float)
+            extras[antiguedad_key] = df[col].map(stored[antiguedad_key]).astype(float)
+    extras['renta_vs_country_mean'] = df['renta'] / extras['mean_renta_by_pais_residencia']
+    df = pd.concat([df, pd.DataFrame(extras, index=df.index)], axis=1)
     return df, stored
 
 
 def feature_engineering(df: pd.DataFrame,
-                        aggregates: Optional[Dict[str, Dict[str, float]]] = None
+                        aggregates: Optional[Dict[str, Dict[str, float]]] = None,
+                        *, cast_categories: bool = True,
                         ) -> tuple[pd.DataFrame, Dict[str, Dict[str, float]]]:
-    """Генерирует производные признаки (арифметика через featuretools + агрегаты).
+    """Генерирует производные признаки (арифметика + агрегаты).
 
     Возвращает (матрица признаков, агрегаты): на обучении агрегаты уезжают
     в `preprocessing_params.json`, на проде — приходят оттуда же.
+
+    Арифметические признаки считаются напрямую pandas/numpy. Раньше здесь
+    на каждый запрос строился featuretools EntitySet и запускался DFS — это
+    стоило ~250 мс на запрос и, главное, падало под нагрузкой: featuretools/
+    woodwork не потокобезопасны, и при ~50 конкурентных запросах каждый
+    четвёртый падал с `KeyError: 'DataFrame main does not exist in bank_data'`
+    (HTTP 500 → success_rate ~70% в test.ipynb). Значения воспроизводят
+    семантику DFS побитово (проверяется тестом на паритет с featuretools):
+    те же имена колонок, чистые numpy-операции (log(0) → -inf, log(x<0)/sqrt(x<0)
+    → NaN, деление на ноль → inf) и приведение нечисловых колонок к category —
+    так делал woodwork, и на этом держится авто-детект числовых/категориальных
+    признаков в modeling.ipynb.
+
+    `cast_categories=False` пропускает приведение к category: оно нужно только
+    обучению (dtype для авто-детекта в modeling.ipynb), а `prepare_features`
+    на инференсе всё равно приводит признаки к str/numeric сразу после.
     """
-    try:
-        import featuretools as ft
-        import woodwork
-    except ImportError as exc:  # pragma: no cover — в прод-окружении зависимости есть
-        raise ImportError(
-            'Для feature_engineering нужны featuretools и woodwork: '
-            'pip install -r requirements.txt') from exc
+    # Колонки, которые DFS (woodwork Double) оставлял числовыми; остальные
+    # приводились к Categorical — сохраняем, чтобы dtype после этой функции
+    # не изменился по сравнению с featuretools-версией.
+    numeric_columns = {
+        'antiguedad', 'renta',
+        'antiguedad + renta', 'antiguedad / renta', 'renta / antiguedad',
+        'antiguedad * renta', 'NATURAL_LOGARITHM(antiguedad)',
+        'NATURAL_LOGARITHM(renta)', 'SQUARE_ROOT(antiguedad)', 'SQUARE_ROOT(renta)',
+    }
+    if cast_categories:
+        for col in df.columns:
+            if col not in numeric_columns:
+                df[col] = df[col].astype('category')
 
-    entity_set = ft.EntitySet(id='bank_data')
-    entity_set = entity_set.add_dataframe(
-        dataframe_name='main',
-        dataframe=df,
-        index='unique_id',
-        make_index=True,
-        logical_types={
-            'antiguedad': woodwork.logical_types.Double,
-            'renta': woodwork.logical_types.Double,
-            **{col: woodwork.logical_types.Categorical for col in df.columns
-               if col not in ['antiguedad', 'renta']},
-        },
-    )
+    # woodwork Double приводил обе колонки к float64 в выходной матрице — повторяем
+    df['antiguedad'] = antiguedad = df['antiguedad'].astype(float)
+    df['renta'] = renta = df['renta'].astype(float)
+    with np.errstate(all='ignore'):  # те же inf/NaN, что давал DFS, но без RuntimeWarning в лог
+        transforms = pd.DataFrame({
+            'antiguedad + renta': antiguedad.to_numpy() + renta.to_numpy(),
+            'antiguedad / renta': antiguedad.to_numpy() / renta.to_numpy(),
+            'renta / antiguedad': renta.to_numpy() / antiguedad.to_numpy(),
+            'antiguedad * renta': antiguedad.to_numpy() * renta.to_numpy(),
+            'NATURAL_LOGARITHM(antiguedad)': np.log(antiguedad.to_numpy()),
+            'NATURAL_LOGARITHM(renta)': np.log(renta.to_numpy()),
+            'SQUARE_ROOT(antiguedad)': np.sqrt(antiguedad.to_numpy()),
+            'SQUARE_ROOT(renta)': np.sqrt(renta.to_numpy()),
+        }, index=df.index)
+    # один concat вместо 8 присваиваний (порядок ключей = порядок колонок DFS)
+    df = pd.concat([df, transforms], axis=1)
 
-    feature_matrix, _ = ft.dfs(
-        entityset=entity_set,
-        target_dataframe_name='main',
-        trans_primitives=['add_numeric', 'multiply_numeric', 'divide_numeric',
-                          'natural_logarithm', 'square_root'],
-        agg_primitives=['mean', 'median', 'std', 'max', 'min', 'count', 'num_unique'],
-        where_primitives=['count'],
-        max_depth=2,
-        features_only=False,
-        verbose=False,
-    )
-
-    df = feature_matrix.drop(columns=['unique_id', 'index'], errors='ignore')
+    df = df.drop(columns=['unique_id', 'index'], errors='ignore')
+    # DFS с make_index всегда возвращал свежий RangeIndex 0..n-1 — повторяем,
+    # чтобы результат не зависел от индекса входного фрейма
+    df = df.reset_index(drop=True)
     df, aggregates_out = manual_transformations(df, aggregates)
-    # Удаляем дубликаты колонок, которые может породить featuretools
+    # Удаляем дубликаты колонок, которые порождала старая DFS-версия
     return df.loc[:, ~df.columns.duplicated()], aggregates_out
 
 
@@ -466,14 +526,23 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
     row = row[BASE_COLUMNS]
 
     row['antiguedad'] = row['antiguedad'].astype(int)
-    row, _ = feature_engineering(row, params.aggregates or None)
+    # cast_categories=False: на инференсе dtypes задаёт цикл ниже, а ~45
+    # приведений к category только добавляли латентности
+    row, _ = feature_engineering(row, params.aggregates or None, cast_categories=False)
 
-    for col in NUMERIC_FEATURES:
-        if col in row.columns:
-            row[col] = pd.to_numeric(row[col], errors='coerce')
-    for col in CATEGORICAL_FEATURES:
-        if col in row.columns:
-            row[col] = row[col].astype('str')
+    # Приведение признаков к итоговым типам — батчем, а не по колонке
+    # (каждое поколоночное присваивание в pandas копирует блоки данных).
+    # Числовые, уже приведённые к float на предыдущих шагах, не трогаем —
+    # to_numeric по ним тождественен.
+    numeric_needs_cast = [
+        col for col in NUMERIC_FEATURES
+        if col in row.columns and not pd.api.types.is_numeric_dtype(row[col])
+    ]
+    if numeric_needs_cast:
+        row[numeric_needs_cast] = row[numeric_needs_cast].apply(pd.to_numeric, errors='coerce')
+    categorical_present = [col for col in CATEGORICAL_FEATURES if col in row.columns]
+    if categorical_present:
+        row[categorical_present] = row[categorical_present].astype('str')
 
     expected = set(NUMERIC_FEATURES) | set(CATEGORICAL_FEATURES)
     absent = sorted(expected - set(row.columns))

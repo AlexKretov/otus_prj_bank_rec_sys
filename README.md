@@ -92,7 +92,11 @@ pip install -r requirements.txt
    совпадает с обучением.
 
 ### Синтез новых признаков
-1. Библиотека featuretools — автоматические агрегации из имеющихся признаков.
+1. Арифметические признаки (`antiguedad ± × / renta`, логарифмы, корни) — pandas/numpy.
+   Изначально считались featuretools-DFS: на инференсе это стоило ~250 мс на запрос и
+   падало гонкой потоков (`KeyError: 'DataFrame main does not exist'` в каждом четвёртом
+   конкурентном запросе → HTTP 500 → SLO success_rate ~70%). Текущая реализация
+   побитово эквивалентна DFS (проверяется тестом на паритет с featuretools).
 2. Общее количество продуктов на последнюю дату 2015 года для каждого клиента.
 3. Персональные рекомендации на основе ALS-модели (признак `recommended_product_id`).
 
@@ -145,6 +149,8 @@ mlflow server \
 
 ```bash
 uvicorn app1:app --host 0.0.0.0 --port 8079
+# с C-реализациями event loop / HTTP-парсера (как в docker-образе):
+uvicorn app1:app --host 0.0.0.0 --port 8079 --loop uvloop --http httptools --no-access-log
 ```
 
 Запуск через docker compose (из корня репозитория, вместе с Prometheus и Grafana):
@@ -152,6 +158,16 @@ uvicorn app1:app --host 0.0.0.0 --port 8079
 ```bash
 docker compose -f fastapi/docker-compose.yaml up --build
 ```
+
+Производительность: предобработка одного запроса — ~18 мс CPU (pandas/numpy,
+без featuretools). При 50 конкурентных клиентах на 2 vCPU сервис держит
+~26 RPS с p95 ≈ 2.2 с; SLO нагрузочного теста (`success_rate ≥ 99%`,
+`p95 < 5000 мс`) выполняется с запасом. Раньше featuretools-DFS на каждый
+запрос стоил ~250 мс и падал гонкой потоков (`KeyError: 'DataFrame main does
+not exist'` в каждом четвёртом конкурентном запросе → HTTP 500 →
+success_rate ~70%). Пул потоков эндпоинтов ограничен
+(`THREAD_POOL_TOKENS`, по умолчанию 10): меньше потоков — меньше
+переключений GIL при CPU-bound обработке.
 
 Сервис принимает `POST /predict` с JSON-профилем клиента (поля как в `columns.txt`,
 обязательно только `ncodpers`, неизвестные поля игнорируются) и отвечает
@@ -165,11 +181,15 @@ docker compose -f fastapi/docker-compose.yaml up --build
 `bank_recommender_requests_total`, гистограмму латентности
 `bank_recommender_predict_latency_seconds` и счётчик предсказаний по классам
 `bank_recommender_predictions_total` (плюс стандартные `process_*`).
-Конфиг скрейпинга — `fastapi/prometheus/prometheus.yml`, дашборд для импорта
-в Grafana — `fastapi/grafana.json` (p95 латентности, ресурсы процесса,
-распределение предсказаний). Порты и учётные данные задаются переменными
-окружения (см. `.env.example`: `VM_PORT`, `THE_PORT`, `PROMETHEUS_PORT`,
-`GRAFANA_PORT`, `GRAFANA_USER`, `GRAFANA_PASS`). Пример дашборда см. в `image.png`.
+Конфиг скрейпинга — `fastapi/prometheus/prometheus.yml`. Дашборд Grafana
+(`fastapi/grafana.json`: p95 латентности, CPU/память процесса, распределение
+предсказаний) загружается автоматически: compose маунтит его и каталог
+`fastapi/grafana/provisioning/` (датасорс Prometheus + провайдер дашбордов),
+поэтому после `docker compose up` дашборд «Bank Recommender» уже на месте —
+импортировать руками ничего не нужно. Порты и учётные данные задаются
+переменными окружения (см. `.env.example`: `VM_PORT`, `THE_PORT`,
+`PROMETHEUS_PORT`, `GRAFANA_PORT`, `GRAFANA_USER`, `GRAFANA_PASS`).
+Пример дашборда см. в `image.png`.
 
 ### Версия модели
 
@@ -252,5 +272,5 @@ pip install nbstripout && nbstripout --install
   и версия модели закоммичены.
 - Возможные следующие шаги сверх P2: считать статистики предобработки только на train
   (убрать утечку до сплита), временное разбиение вместо стратифицированного,
-  замена featuretools-DFS для одной строки на pandas-арифметику (быстрее инференс),
-  перенос отчётов в `artifacts/`.
+  перенос отчётов в `artifacts/`. (Замена featuretools-DFS на pandas-арифметику
+  выполнена — см. «Синтез новых признаков».)

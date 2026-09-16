@@ -20,4 +20,9 @@ COPY fastapi/ ./fastapi/
 
 EXPOSE 8079
 
-CMD uvicorn app1:app --host 0.0.0.0 --port ${THE_PORT:-8079}
+# uvloop + httptools: C-реализации event loop и HTTP-парсера — без них
+# конкурентные запросы упираются в чистопитонный h11 и «карусель» GIL.
+# Access-log выключен: наблюдение за запросами — через /metrics (Prometheus),
+# а логирование каждого запроса заметно ест латентность под нагрузкой.
+CMD uvicorn app1:app --host 0.0.0.0 --port ${THE_PORT:-8079} \
+    --loop uvloop --http httptools --no-access-log

@@ -39,6 +39,7 @@ import logging
 import math
 import os
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, List, Optional, Union
 
@@ -78,7 +79,7 @@ try:
     PREDICT_LATENCY = Histogram(
         'bank_recommender_predict_latency_seconds',
         'Латентность POST /predict (предобработка + predict_proba).',
-        buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
+        buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0),
     )
     PREDICTION_COUNT = Counter(
         'bank_recommender_predictions_total',
@@ -251,10 +252,30 @@ class HealthResponse(BaseModel):
     personal_recs_loaded: bool
 
 
+# --- Пул потоков синхронных эндпоинтов --------------------------------------
+# FastAPI выполняет обычные (def) эндпоинты в thread pool anyio (по умолчанию
+# 40 токенов). /predict — CPU-bound pandas, который держит GIL: при 50
+# конкурентных запросах десятки потоков устраивают «карусель» GIL — латентность
+# вырастает в разы при недогруженных ядрах. Меньше потоков — меньше
+# переключений контекста, та же пропускная способность (GIL всё равно
+# сериализует Python-код), но предсказуемая латентность.
+THREAD_POOL_TOKENS = int(os.getenv('THREAD_POOL_TOKENS', '10'))
+
+
+@asynccontextmanager
+async def _lifespan(_: FastAPI):
+    import anyio.to_thread
+
+    anyio.to_thread.current_default_thread_limiter().total_tokens = THREAD_POOL_TOKENS
+    logger.info('Пул потоков синхронных эндпоинтов: %s', THREAD_POOL_TOKENS)
+    yield
+
+
 app = FastAPI(
     title='Bank product recommender',
     description='Рекомендация банковского продукта по профилю клиента (см. README.md).',
-    version='1.2.1',
+    version='1.2.2',
+    lifespan=_lifespan,
 )
 
 
@@ -317,9 +338,11 @@ def metrics() -> Response:
 def predict(profile: ClientProfile) -> PredictionResponse:
     """Скорит профиль клиента.
 
-    Обычный `def`, а не `async def`: внутри CPU-bound pandas/featuretools,
-    uvicorn сам вынесет вызов в thread pool и не заблокирует event loop
-    (CODE_REVIEW §2.3).
+    Обычный `def`, а не `async def`: внутри CPU-bound pandas, uvicorn сам
+    вынесет вызов в thread pool и не заблокирует event loop
+    (CODE_REVIEW §2.3). Сама предобработка потокобезопасна: общих
+    мутируемых структур нет (раньше featuretools-DFS на каждый запрос
+    падал гонкой потоков — см. docstring `feature_engineering`).
     """
     started = time.perf_counter()
     if MODEL is None:
