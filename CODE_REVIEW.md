@@ -169,15 +169,30 @@ recommended_product_id = personal_recs.loc[rf['ncodpers'],'recommended_product_i
 
 Дополнительно в рамках P0: в `loader.ipynb` сохранение датасета приведено к `df.to_csv('data/train_ver2.csv', index=False)`.
 
-### P1 — «методологическая честность и воспроизводимость» (M)
-| # | Действие | Файлы | Трудоёмкость |
-|---|----------|-------|--------------|
-| 8 | Решить судьбу таргета (`range(3)`) + отразить в README и выводах | `modeling.ipynb`, `README.md` | S–M |
-| 9 | Optuna: скоринг по CV на train; тест — один раз в конце | `modeling.ipynb` (яч. 52–53) | M |
-| 10 | Сериализовать все параметры предобработки из обучения (бины, медианы/моды, clip-границы, когорты дат, агрегаты) → единые JSON-артефакты для сервиса | `modeling.ipynb`, `app1.py` | M |
-| 11 | Честный отчёт о качестве: per-class + macro + PR-AUC; поправить markdown-выводы; метрики ALS (precision@k) | `modeling.ipynb`, `README.md` | M |
-| 12 | Слить редкие классы таргета; убрать `verbose=3`, мёртвый код, `pl.DataFrame` → `pd.DataFrame` | `modeling.ipynb` | S |
-| 13 | `async def predict` → `def`; Pydantic-схема запроса; `/health` | `app1.py` | M |
+### P1 — «методологическая честность и воспроизводимость» — ✅ выполнено 16.09.2026
+| # | Действие | Файлы | Статус |
+|---|----------|-------|--------|
+| 8 | Решить судьбу таргета (`range(3)`) + отразить в README и выводах | `modeling.ipynb`, `README.md` | ✅ таргет — многоклассовый: шорт-лист продуктов (доля покупок 2015 ≥ 1%, не больше 12) плюс классы `0` (покупки не было) и `other` (редкий продукт); правило и состав шорт-листа описаны в README («Целевая переменная») и в выводах ноутбука |
+| 9 | Optuna: скоринг по CV на train; тест — один раз в конце | `modeling.ipynb` (яч. 52–53) | ✅ `cross_val_roc_auc` считает ROC-AUC по `StratifiedKFold(3, shuffle, 42)` на train; тестовая выборка оценивается один раз после выбора гиперпараметров, `cv_roc_auc_mean` логируется в MLflow |
+| 10 | Сериализовать все параметры предобработки из обучения (бины, медианы/моды, clip-границы, когорты дат, агрегаты) → единые JSON-артефакты для сервиса | `modeling.ipynb`, `app1.py` | ✅ `fastapi/preprocessing_params.json` (`medians`, `modes`, `clip_bounds`, `age_intervals`, `date_cohorts`, `aggregates`, `replacer`, `label_map`, `feature_columns`); `app1.py` читает файл, а при его отсутствии работает на legacy-константах и пишет предупреждение в лог |
+| 11 | Честный отчёт о качестве: per-class + macro + PR-AUC; поправить markdown-выводы; метрики ALS (precision@k) | `modeling.ipynb`, `README.md` | ✅ `classification_report.txt` — per-class таблица, macro-/взвешенные метрики и PR-AUC с долей класса; `als_metrics.csv` — precision@k, recall@k, hit_rate; выводы ноутбука и разделы README «Проверка модели» / «Ограничения» переписаны |
+| 12 | Слить редкие классы таргета; убрать `verbose=3`, мёртвый код, `pl.DataFrame` → `pd.DataFrame` | `modeling.ipynb` | ✅ классы с support меньше 100 сворачиваются в `other` (`MIN_CLASS_SUPPORT`); `verbose=3`, мёртвые ячейки (`comon_train`, `remove_correlated_features`) и `pl.DataFrame` удалены |
+| 13 | `async def predict` → `def`; Pydantic-схема запроса; `/health` | `app1.py` | ✅ `def predict(profile: ClientProfile)` — обычная функция (внутри CPU-bound pandas/featuretools), ответ — `PredictionResponse` (`prediction`, `product`, `confidence`, `top_k`), добавлен `GET /health` |
+
+**Условие вступления правок в силу:** код ноутбука и сервиса изменён, но артефакты
+(`fastapi/saved_model.pkl`, `fastapi/preprocessing_params.json`, `als_metrics.csv`,
+`classification_report.txt`) пересоздаются только при прогоне `modeling.ipynb` на реальных
+данных — до переобучения в репозитории лежат артефакты и метрики прошлого запуска,
+а `app1.py` для отсутствующего `preprocessing_params.json` работает на legacy-константах.
+Проверка выполнена на синтетическом датасете (ноутбук проходит целиком, сервис корректно
+работает на его артефактах); прогон на настоящем `data/train_ver2.csv` не выполнялся —
+в окружении сборки нет ключей Kaggle и самого файла.
+
+Дополнительно в рамках P1: `loader.ipynb` переведён с S3-бакета на загрузку датасета из
+соревнования Kaggle (`KAGGLE_USERNAME`/`KAGGLE_KEY`, `kaggle==1.7.4.5` в `requirements.txt`,
+шаблон `.env.example`); в `test.ipynb`, `eda.ipynb`, `rec_sys.ipynb` путь к датасету приведён
+к `data/train_ver2.csv` (его сохраняет `loader.ipynb`), `.env` добавлен в `.gitignore`.
+
 
 ### P2 — «качество жизни и поддержка» (M–L, по желанию)
 | # | Действие | Файлы | Трудоёмкость |

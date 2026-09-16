@@ -11,6 +11,7 @@ mlflow==2.7.1
 psycopg2-binary==2.9.10
 fireducks==1.2.8
 python-dotenv==1.0.1
+kaggle==1.7.4.5
 optuna==4.3.0
 implicit==0.7.2
 featuretools==1.31.0
