@@ -169,19 +169,26 @@ def run_load_test(profiles, url, max_time, workers, label_map, verbose=True):
 
 def generate_report(results_df, *, url=URL, workers=WORKERS,
                     p95_slo_ms=P95_SLO_MS, min_success_rate=MIN_SUCCESS_RATE,
-                    report_dir=REPORT_DIR):
-    """Считает метрики, рисует графики, пишет HTML-отчёт. Падает при нарушении SLO."""
-    ok = results_df['success'].mean() * 100
+                    report_dir=REPORT_DIR, eps=1e-9):
+    """Считает метрики, рисует графики, пишет HTML-отчёт.
+
+    Возвращает dict с метриками и флагом slo_ok. Нарушение SLO — не
+    AssertionError (assert отключается под -O), а явный ValueError ниже.
+    """
+    ok = float(results_df['success'].mean() * 100)
     latencies = results_df.loc[results_df['success'], 'latency']
-    if latencies.empty:  # все запросы упали — латентности нет, упадём по success_rate ниже
+    if latencies.empty:
         latencies = pd.Series([0.0])
     wall_seconds = results_df.attrs.get('wall_seconds', 0)
+    p95 = float(np.percentile(latencies, 95))
+    p99 = float(np.percentile(latencies, 99))
+
     report = {
         'total_requests': len(results_df),
         'success_rate': ok,
         'avg_latency': float(latencies.mean()),
-        'p95_latency': float(np.percentile(latencies, 95)),
-        'p99_latency': float(np.percentile(latencies, 99)),
+        'p95_latency': p95,
+        'p99_latency': p99,
         'rps': len(results_df) / wall_seconds if wall_seconds else None,
         'error_distribution': results_df['error'].value_counts().to_dict(),
     }
@@ -223,10 +230,20 @@ def generate_report(results_df, *, url=URL, workers=WORKERS,
     html_path.write_text(html_report, encoding='utf-8')
     print(f'Отчёты сохранены: {html_path}, {png_path}')
 
-    assert ok >= min_success_rate, (
-        f'SLO нарушен: success_rate={ok:.1f}% < {min_success_rate}%')
-    assert report['p95_latency'] < p95_slo_ms, (
-        f"SLO нарушен: p95={report['p95_latency']:.0f} мс >= {p95_slo_ms} мс")
+    # --- SLO-проверки: с допуском eps, без assert -------------------------
+    failures = []
+    if ok + eps < min_success_rate:
+        failures.append(
+            f'success_rate={ok:.4f}% < {min_success_rate}% '
+            f'(не хватило {min_success_rate - ok:.4f} п.п.)'
+        )
+    if p95 + eps >= p95_slo_ms:
+        failures.append(
+            f'p95={p95:.0f} мс >= {p95_slo_ms} мс'
+        )
+    if failures:
+        raise ValueError('SLO нарушен: ' + '; '.join(failures))
+
     return report
 
 
@@ -242,7 +259,11 @@ def main() -> int:
     results = run_load_test(profiles, URL, max_time=MAX_TIME, workers=WORKERS,
                             label_map=label_map)
     print('Test completed, generating report...')
-    report = generate_report(results)  # бросает AssertionError при нарушении SLO
+    try:
+        report = generate_report(results)
+    except ValueError as exc:
+        print(f'LOAD TEST FAILED: {exc}', file=sys.stderr)
+        return 1
     print(pd.DataFrame([report]).to_string(index=False))
     return 0
 
@@ -250,6 +271,6 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except AssertionError as exc:
+    except (AssertionError, ValueError) as exc:
         print(f'LOAD TEST FAILED: {exc}', file=sys.stderr)
         sys.exit(1)

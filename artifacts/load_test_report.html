@@ -2,6 +2,8 @@
     <html>
         <body>
             <h1>Load Test Report</h1>
+            <p>URL: http://localhost:8079/predict, workers: 50, SLO: p95 &lt; 5000.0 мс,
+               success_rate &gt;= 99.0%</p>
             <pre><table border="1" class="dataframe">
   <thead>
     <tr style="text-align: right;">
@@ -11,18 +13,20 @@
       <th>avg_latency</th>
       <th>p95_latency</th>
       <th>p99_latency</th>
+      <th>rps</th>
       <th>error_distribution</th>
     </tr>
   </thead>
   <tbody>
     <tr>
       <th>0</th>
-      <td>7</td>
-      <td>100.0</td>
-      <td>2223.821402</td>
-      <td>2264.83047</td>
-      <td>2266.235518</td>
-      <td>{}</td>
+      <td>1408</td>
+      <td>99.005682</td>
+      <td>1822.454449</td>
+      <td>2483.313203</td>
+      <td>2671.183009</td>
+      <td>27.556851</td>
+      <td>{'HTTP 422': 14}</td>
     </tr>
   </tbody>
 </table></pre>
