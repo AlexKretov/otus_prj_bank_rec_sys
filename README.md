@@ -1,346 +1,459 @@
 # Рекомендательная система банковских продуктов
 
-## Задача
-Создание рекомендательной системы для банковских продуктов.
+Проект строит рекомендательную систему для банковских продуктов на датасете
+**Santander Product Recommendation**: по профилю клиента и текущему набору продуктов
+модель оценивает, какой продукт клиент может приобрести в следующем периоде.
 
-## Описание
-Имеется набор данных по клиентам банка, где на ряд дат 2015 года приведены основные характеристики клиентов
-и перечень банковских продуктов, которыми они обладают. Необходимо создать рекомендательную систему,
-которая рекомендует клиентам банка продукты, которые могут быть им интересны.
-В качестве верификации используются данные из 2016 года, приведённые в том же файле.
-
-На основе обученной модели сделан микросервис (FastAPI), который принимает профиль клиента
-по HTTP-запросу и возвращает предсказание.
+В репозитории есть полный контур: загрузка данных → EDA → обучение модели → офлайн-
+проверка инференса → FastAPI-сервис → нагрузочный тест → мониторинг Prometheus/Grafana.
 
 ## Структура репозитория
 
-| Файл | Назначение |
+| Путь | Назначение |
 |---|---|
-| `loader.ipynb` | Загрузка датасета `train_ver2.csv` из соревнования Kaggle в каталог `data/` |
-| `eda.ipynb` | Исследовательский анализ данных и выводы |
-| `modeling.ipynb` | Основной ноутбук: предобработка (статистики только на train), временное разбиение, ALS-признак, обучение и тюнинг модели, артефакты, выводы |
-| `rec_sys.ipynb` | Офлайн-проверка инференса: предобработка одного клиента и предсказание сохранённой моделью |
-| `load_test.py` | Нагрузочный тест сервиса (запускается из CI); формирует `artifacts/load_test_report.html` / `artifacts/load_test_report.png` |
-| `test.ipynb` | Тонкая интерактивная обёртка над `load_test.py` |
-| `preprocessing.py` | Общий модуль предобработки: используют и `modeling.ipynb` (fit/apply), и сервис |
-| `drift.py` | PSI-мониторинг дрейфа входных признаков (скользящее окно против эталона обучения) |
-| `app1.py` | Микросервис предсказаний (FastAPI): `POST /predict`, `GET /health`, `GET /metrics`, `GET /drift` |
-| `tests/` | Pytest-набор: предобработка (в т.ч. fit/apply, временное разбиение), дрейф-мониторинг, API, smoke-тесты артефактов |
-| `requirements-dev.txt` | Зависимости разработчика (`pytest`, `httpx`, `ruff`) |
-| `pyproject.toml` | Конфиги `pytest` и `ruff` |
-| `.env.example` | Шаблон `.env`: ключи Kaggle, настройки MLflow, сервиса и мониторинга |
-| `recommendations_analysis.md` | Итоговый аналитический отчёт по данным (см. также выводы в `eda.ipynb`) |
-| `CODE_REVIEW.md` | Результаты code review и план улучшений проекта |
-| `columns.txt` | Человекочитаемые названия колонок датасета |
-| `artifacts/` | Отчёты последних запусков: `classification_report.txt`, `feature_importances.csv`, `als_metrics.csv`, `load_test_report.html` / `.png` |
-| `replacer.json` | Старая копия словаря редких категорий; актуальный файл генерируется в `fastapi/replacer.json` |
-| `fastapi/` | Артефакты для сервиса (`saved_model.pkl`, `preprocessing_params.json`, `model_version.json`, `replacer.json`, `personal_als.parquet`) и инфраструктура (`Dockerfile`, `docker-compose.yaml`, `prometheus/`, `grafana.json`) |
-| `image.png` | Скриншот примера дашборда Grafana |
+| `loader.ipynb` | Загрузка `train_ver2.csv` из Kaggle в `data/` и проверка целостности файла. |
+| `eda.ipynb` | Исследовательский анализ данных, выводы по пропускам, выбросам, категориям и продуктам. |
+| `recommendations_analysis.md` | Краткий аналитический отчёт по EDA и итоговому качеству модели. |
+| `modeling.ipynb` | Основной ноутбук обучения: таргет, ALS-признак, временное разбиение, train-only предобработка, Optuna, MLflow, экспорт артефактов. |
+| `rec_sys.ipynb` | Офлайн-проверка инференса на одном реальном клиенте без запуска HTTP-сервиса. |
+| `test.ipynb` | Интерактивная обёртка над нагрузочным тестом. |
+| `preprocessing.py` | Единый модуль предобработки для обучения, офлайн-инференса и FastAPI. |
+| `drift.py` | PSI-мониторинг дрейфа входных признаков `age`, `antiguedad`, `renta`. |
+| `app1.py` | FastAPI-сервис: `POST /predict`, `GET /health`, `GET /metrics`, `GET /drift`. |
+| `load_test.py` | Нагрузочный тест сервиса с проверкой схемы ответа и SLO; пишет отчёты в `artifacts/`. |
+| `tests/` | Pytest-набор для предобработки, API, дрейфа и smoke-проверки артефактов. |
+| `artifacts/` | Последние сохранённые отчёты: качество модели, важности признаков, ALS-метрики, нагрузочный отчёт. |
+| `fastapi/` | Dockerfile, docker compose, Prometheus/Grafana-конфиги и артефакты сервиса (`preprocessing_params.json`, `model_version.json`, `replacer.json`, `personal_als.parquet`). |
+| `.env.example` | Шаблон переменных окружения для Kaggle, MLflow, сервиса, мониторинга и нагрузочного теста. |
 
-Ноутбуки запускаются по порядку: `loader.ipynb` → `eda.ipynb` → `modeling.ipynb` →
-`rec_sys.ipynb` (офлайн-проверка) → `test.ipynb` (нагрузочный прогон поднятого сервиса).
-Канонические ноутбуки — только эти пять; курсовых «сшивок» (`full_final_prj`,
-`mle_final_prj2` из CODE_REVIEW §4.5) в репозитории нет.
+Канонический порядок запуска ноутбуков:
 
-## Построение модели
+```text
+loader.ipynb → eda.ipynb → modeling.ipynb → rec_sys.ipynb → test.ipynb
+```
 
-Сначала проводится исследовательский анализ данных (`eda.ipynb`, в нём же основные выводы),
-затем в `modeling.ipynb` строится и оценивается модель.
+## Подготовка окружения
 
-### Подготовка среды
-Требуется Python ≥ 3.10.
+Требуется Python 3.10+.
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+source .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### Данные
-Датасет берётся из соревнования Kaggle
-**[Santander Product Recommendation](https://www.kaggle.com/competitions/santander-product-recommendation/data)**.
+Для разработки и тестов дополнительно:
 
-1. Получите API-токен: Kaggle → *Settings* → *API* → *Create New Token* (скачается `kaggle.json`).
-2. Примите правила соревнования на вкладке *Data → Rules* — иначе Kaggle не отдаёт файлы.
-3. Создайте `.env` по образцу `.env.example` и укажите в нём `KAGGLE_USERNAME` и `KAGGLE_KEY`
-   (альтернатива — положить `kaggle.json` в `~/.kaggle/kaggle.json`).
-4. Запустите `loader.ipynb` — он скачает `train_ver2.csv` (≈2.3 ГБ, 13 647 309 строк × 48 колонок)
-   и сохранит его в `data/`.
+```bash
+pip install -r requirements-dev.txt
+pytest
+ruff check .
+```
 
-Датасет в репозиторий не входит (каталог `data/` указан в `.gitignore`).
+## Данные
+
+Датасет берётся из Kaggle Competition
+[Santander Product Recommendation](https://www.kaggle.com/competitions/santander-product-recommendation/data).
+
+1. На странице соревнования примите правила (*Rules → I Understand and Accept*).
+2. В Kaggle откройте *Settings → API → Create New Token* и скачайте `kaggle.json`.
+3. Либо положите файл в `~/.kaggle/kaggle.json`, либо создайте `.env`:
+
+   ```bash
+   cp .env.example .env
+   # затем заполните KAGGLE_USERNAME и KAGGLE_KEY
+   ```
+
+4. Запустите `loader.ipynb`. Он скачает архив соревнования, найдёт `train_ver2.csv`,
+   сохранит его в `data/` и проверит размер/колонки/число строк.
+
+`data/` не коммитится: исходный CSV весит около 2.14 ГБ.
+
+## Как устроена модель
 
 ### Целевая переменная
-Модель — многоклассовый классификатор: он предсказывает, какой продукт клиент купит в 2016 году.
-Класс `0` — «покупки не было», остальные классы — коды продуктов из шорт-листа,
-`other` (`99`) — если первым куплен продукт, не попавший в шорт-лист.
 
-Шорт-лист — продукты, на которые в 2015 году пришлось не меньше 1% покупок
-(у большинства из 24 продуктов доля покупателей меньше 0.5%, поэтому классы по ним
-состояли бы из одного-двух объектов). Правило отбора, состав шорт-листа и расшифровка
-классов печатаются в `modeling.ipynb` и сохраняются в `fastapi/preprocessing_params.json`
-(ключ `label_map`).
+Модель решает многоклассовую задачу: предсказывает первый продукт, который клиент
+приобретёт в 2016 году.
 
-### Предобработка данных
-Предобработка включает в себя:
-1. Удаление малоинформативных признаков (`indrel`, `indext`, `nomprov`, `tipodom`).
-2. Замена возраста (`age`) на возрастные корзины.
-3. Замена временных переменных (`fecha_alta`, `ult_fec_cli_1t`) на интервалы.
-4. Устранение экстремумов в числовых переменных (`renta`, `antiguedad`): всё, что менее 1% квантиля
-   и более 96% квантиля, заменяется на соответствующее предельное значение.
-5. Сворачивание маргинальных групп (менее 1%) в одну категорию `other` по всем категориальным показателям.
-6. Все статистики (медианы, моды, границы клиппинга, возрастные бины, когорты дат, наборы редких
-   категорий и групповые агрегаты) **обучаются только на train-части**
-   (`fit_preprocessing_params` в `preprocessing.py`) — утечки до сплита нет (см. «Валидация»).
-7. Сохранение посчитанных параметров (плюс агрегаты, расшифровка классов и эталонные
-   гистограммы `drift_reference` для мониторинга дрейфа) в
-   `fastapi/preprocessing_params.json` — этот файл читает сервис, поэтому предобработка на проде
-   совпадает с обучением (та же функция `apply_preprocessing` применяется к train/test
-   и к профилю запроса).
+- `0` — покупки нет;
+- коды `3`, `5`, `8`, `9`, `12`, `13`, `18`, `19`, `20`, `22`, `23`, `24` — продукты из шорт-листа;
+- `99` (`other`) — первым куплен продукт вне шорт-листа.
 
-### Синтез новых признаков
-1. Арифметические признаки (`antiguedad ± × / renta`, логарифмы, корни) — pandas/numpy.
-   Изначально считались featuretools-DFS: на инференсе это стоило ~250 мс на запрос и
-   падало гонкой потоков (`KeyError: 'DataFrame main does not exist'` в каждом четвёртом
-   конкурентном запросе → HTTP 500 → SLO success_rate ~70%). Текущая реализация
-   побитово эквивалентна DFS (проверяется тестом на паритет с featuretools).
-2. Общее количество продуктов на последнюю дату 2015 года для каждого клиента.
-3. Персональные рекомендации на основе ALS-модели (признак `recommended_product_id`).
+Шорт-лист строится по покупкам 2015 года: в отдельные классы попадают продукты с
+долей покупок не ниже 1%, затем берутся первые 12 продуктов. В последнем запуске
+13 продуктов прошли порог 1%, но из-за ограничения `MAX_TARGET_PRODUCTS=12` продукт
+`ind_fond_fin_ult1` попал в `other`.
 
-### Моделирование
-Модель построена с помощью sklearn в формате pipeline: кодировка категориальных признаков,
-нормализация числовых, отбор признаков. Основную предсказывающую функцию выполняет
-`RandomForestClassifier` с `class_weight='balanced'`.
+### Предобработка и признаки
 
-**Валидация.** Разбиение train/test — **временное** (`temporal_split` в `preprocessing.py`)
-по дате привлечения клиента (`fecha_alta`): в train — клиенты, привлечённые до cutoff-даты
-(≈70%), в test — более новые. По дате последнего среза разбивать нельзя: она тянет за собой
-отток (клиенты с ранней последней датой просто ушли из банка, и «покупок 2016» у них нет
-априори). Профили одного клиента не смешиваются между частями, поэтому метрики
-соответствуют честному временному сценарию (модель не подглядывает в будущее).
-Тюнинг гиперпараметров (Optuna) скорится по **кросс-валидации на train**; тестовая выборка
-используется один раз — для финальной оценки. Обучение, метрики, параметры разбиения
-и артефакты логируются в MLflow.
+Предобработка выполняется единым кодом из `preprocessing.py`:
 
-### Запуск MLflow (опционально)
+1. удаляются малоинформативные признаки `indrel`, `indext`, `nomprov`, `tipodom`;
+2. числовые признаки (`age`, `antiguedad`, `renta`) приводятся к числам;
+3. пропуски заполняются медианами/модами обучающей части;
+4. возраст переводится в интервалы, даты — во временные когорты;
+5. редкие категории сворачиваются в `other`;
+6. `renta` и `antiguedad` клиппируются по квантилям;
+7. добавляются арифметические признаки и групповые агрегаты;
+8. добавляется `total_products` — число продуктов у клиента;
+9. добавляется персональная ALS-рекомендация `recommended_product_id`.
+
+Все статистики предобработки обучаются только на train-части и сохраняются в
+`fastapi/preprocessing_params.json`. Сервис использует тот же файл, поэтому инференс
+повторяет обучающий пайплайн.
+
+### Разбиение и обучение
+
+В актуальном ноутбуке `modeling.ipynb` используется временное разбиение по дате
+привлечения клиента `fecha_alta`:
+
+- train — клиенты, привлечённые до cutoff;
+- test — более новые клиенты;
+- cutoff последнего запуска: `2013-10-09`;
+- размерности последнего запуска: train `(644744, 57)`, test `(275674, 57)`.
+
+Гиперпараметры `RandomForestClassifier(class_weight='balanced')` подбираются Optuna
+по кросс-валидации на train. Test используется один раз — для финальной оценки.
+
+## Качество рекомендательной системы
+
+Актуальные числа зафиксированы в `artifacts/classification_report.txt`,
+`artifacts/als_metrics.csv` и выводах `modeling.ipynb`.
+
+### Главное резюме
+
+Модель **существенно лучше случайного ранжирования продуктов**. Для PR-AUC базовый
+уровень случайного ранжирования равен доле класса в test (`share` в отчёте). По
+продуктовым классам с ненулевым support средний PR-AUC составляет **0.296** против
+средней базовой доли **0.0093**, то есть примерно **в 31.8 раза выше бейзлайна**.
+
+При этом accuracy интерпретировать нужно осторожно: 90.46% test — это класс
+`no_purchase`. Если всегда предсказывать «покупки нет», accuracy будет около 90.46%.
+Текущая модель даёт **93.40% accuracy** (`+2.94 п.п.`), но для рекомендаций важнее
+per-class PR-AUC, recall/precision по продуктам и lift относительно доли класса.
+
+### Метрики финального классификатора
+
+| Метрика | Значение последнего запуска |
+|---|---:|
+| CV ROC-AUC macro на train | 0.9622 |
+| ROC-AUC macro OVR на test | 0.9594 |
+| Accuracy на test | 0.9340 |
+| Precision macro | 0.3235 |
+| Recall macro | 0.3362 |
+| F1 macro | 0.2816 |
+| PR-AUC macro | 0.3437 |
+
+### Lift по ключевым продуктам относительно случайного бейзлайна
+
+| Продукт | Support test | Доля класса | PR-AUC | Lift к случайному PR-AUC |
+|---|---:|---:|---:|---:|
+| `ind_recibo_ult1` | 10 543 | 3.824% | 0.584 | 15.3× |
+| `ind_cco_fin_ult1` | 3 450 | 1.252% | 0.502 | 40.1× |
+| `ind_nomina_ult1` | 3 600 | 1.306% | 0.413 | 31.7× |
+| `ind_ecue_fin_ult1` | 2 731 | 0.991% | 0.296 | 29.9× |
+| `ind_cno_fin_ult1` | 2 566 | 0.931% | 0.234 | 25.2× |
+| `ind_nom_pens_ult1` | 496 | 0.180% | 0.743 | 412.9× |
+
+`ind_nom_pens_ult1` показывает максимальный lift, но support у него небольшой —
+такие значения нужно подтверждать на последующих периодах. Наиболее устойчивые
+практические выводы дают массовые продукты с тысячами объектов в test.
+
+### ALS как самостоятельный baseline и как признак
+
+ALS строит персональные top-5 рекомендации по истории 2015 года и используется в
+финальном классификаторе как признак `recommended_product_id`.
+
+| Scope | Users | precision@5 | recall@5 | hit_rate@5 |
+|---|---:|---:|---:|---:|
+| Клиенты, присутствующие и в 2015, и в 2016 | 94 091 | 3.18% | 9.60% | 13.36% |
+| Все покупатели 2016 года, включая cold-start | 115 867 | 2.58% | 7.79% | 10.85% |
+
+Вывод: ALS сам по себе — слабый, но полезный baseline. Финальная модель использует
+ALS-рекомендацию вместе с анкетными, продуктовыми и агрегатными признаками; по PR-AUC
+она даёт кратный lift относительно случайного бейзлайна по продуктам.
+
+## Артефакты обучения
+
+`modeling.ipynb` создаёт/обновляет:
+
+- `fastapi/saved_model.pkl` — sklearn-пайплайн для сервиса и `rec_sys.ipynb`;
+- `fastapi/preprocessing_params.json` — параметры предобработки;
+- `fastapi/model_version.json` — run id, дата, split, гиперпараметры и метрики;
+- `fastapi/replacer.json` — словарь редких категорий;
+- `fastapi/personal_als.parquet` — персональные ALS-рекомендации по `ncodpers`;
+- `artifacts/classification_report.txt` — полный отчёт качества;
+- `artifacts/feature_importances.csv` — важности отобранных признаков;
+- `artifacts/als_metrics.csv` — top-k метрики ALS.
+
+`*.pkl` игнорируется Git, поэтому после свежего клона `fastapi/saved_model.pkl` может
+отсутствовать. В таком случае сервис поднимется, но `POST /predict` вернёт `503` до
+запуска `modeling.ipynb` или ручной передачи файла модели.
+
+## MLflow
+
+MLflow нужен для истории экспериментов, но сервис читает локальные артефакты из
+`fastapi/`.
+
 ```bash
 mlflow server \
-    --host 127.0.0.1 \
-    --port 5000 \
-    --backend-store-uri sqlite:///mlflow.db \
-    --default-artifact-root ./mlruns_artifacts
+  --host 127.0.0.1 \
+  --port 5000 \
+  --backend-store-uri sqlite:///mlflow.db \
+  --default-artifact-root ./mlruns_artifacts
 ```
-Далее ноутбуки запускаются по порядку: `eda.ipynb` → `modeling.ipynb` → `rec_sys.ipynb`.
 
-### Проверка модели
-Отчёт последнего запуска — `artifacts/classification_report.txt` (per-class таблица, macro-
-и взвешенные метрики, PR-AUC по каждому классу), важности признаков —
-`artifacts/feature_importances.csv`, качество ALS — `artifacts/als_metrics.csv`
-(precision@k, recall@k, hit_rate в двух скоупах: клиенты обоих годов и все покупатели
-2016 года, включая cold-start).
+Переменные `MLFLOW_TRACKING_HOST` и `MLFLOW_TRACKING_PORT` можно задать в `.env`.
 
-> **Важно при интерпретации:** классы сильно несбалансированы (доля покупок ≈ 2%),
-> поэтому accuracy и взвешенные метрики описывают в основном класс «покупки не было».
-> Ориентируйтесь на per-class метрики, macro-метрики и PR-AUC (average precision) по
-> классам-покупкам: при таком дисбалансе PR-AUC честнее ROC-AUC, а базовый уровень
-> случайного ранжирования равен доле класса (колонка `share` в отчёте). Методологические
-> оговорки собраны в `CODE_REVIEW.md` и в разделе «Ограничения» ниже.
+## FastAPI-сервис
 
-## Развёртывание микросервиса
-
-Для запуска сервиса нужны артефакты (все создаются в `modeling.ipynb` в каталоге `fastapi/`):
-- `fastapi/saved_model.pkl` — обученный sklearn-пайплайн (`joblib.dump`), канонический экспорт;
-- `fastapi/preprocessing_params.json` — параметры предобработки, посчитанные при обучении
-  (медианы, моды, границы клиппинга, возрастные бины, когорты дат, агрегаты, расшифровка классов);
-- `fastapi/model_version.json` — версия модели: run id, дата, гиперпараметры, метрики, классы;
-- `fastapi/replacer.json` — словарь сворачивания редких категорий в `other`;
-- `fastapi/personal_als.parquet` — персональные ALS-рекомендации, индексированные по `ncodpers`.
-
-Каталог артефактов переопределяется переменной окружения `ARTIFACTS_DIR` (см. `.env.example`).
-Если `preprocessing_params.json` отсутствует, сервис работает на legacy-константах
-из `preprocessing.py` и предупреждает об этом в логе — такие константы могли разойтись
-с обучающим запуском.
-
-Запуск напрямую:
+### Локальный запуск
 
 ```bash
 uvicorn app1:app --host 0.0.0.0 --port 8079
-# с C-реализациями event loop / HTTP-парсера (как в docker-образе):
-uvicorn app1:app --host 0.0.0.0 --port 8079 --loop uvloop --http httptools --no-access-log
 ```
 
-Запуск через docker compose (из корня репозитория, вместе с Prometheus и Grafana):
+Проверка состояния:
+
+```bash
+curl http://localhost:8079/health
+```
+
+Пример запроса:
+
+```bash
+curl -X POST "http://localhost:8079/predict" \
+  -H "Content-Type: application/json" \
+  -d '{
+        "ncodpers": 1049144,
+        "fecha_dato": "2015-01-28",
+        "ind_empleado": "N",
+        "pais_residencia": "ES",
+        "sexo": "V",
+        "age": 24,
+        "fecha_alta": "2012-08-10",
+        "ind_nuevo": 0,
+        "antiguedad": 35,
+        "indrel_1mes": "1.0",
+        "tiprel_1mes": "I",
+        "indresi": "S",
+        "conyuemp": null,
+        "canal_entrada": "KHE",
+        "indfall": "N",
+        "cod_prov": 28,
+        "ind_actividad_cliente": 0,
+        "renta": 101850,
+        "segmento": "03 - UNIVERSITARIO",
+        "ind_ahor_fin_ult1": 0,
+        "ind_aval_fin_ult1": 0,
+        "ind_cco_fin_ult1": 1,
+        "ind_cder_fin_ult1": 0,
+        "ind_cno_fin_ult1": 0,
+        "ind_ctju_fin_ult1": 0,
+        "ind_ctma_fin_ult1": 0,
+        "ind_ctop_fin_ult1": 0,
+        "ind_ctpp_fin_ult1": 0,
+        "ind_deco_fin_ult1": 0,
+        "ind_deme_fin_ult1": 0,
+        "ind_dela_fin_ult1": 0,
+        "ind_ecue_fin_ult1": 0,
+        "ind_fond_fin_ult1": 0,
+        "ind_hip_fin_ult1": 0,
+        "ind_plan_fin_ult1": 0,
+        "ind_pres_fin_ult1": 0,
+        "ind_reca_fin_ult1": 0,
+        "ind_tjcr_fin_ult1": 0,
+        "ind_valo_fin_ult1": 0,
+        "ind_viv_fin_ult1": 0,
+        "ind_nomina_ult1": 0,
+        "ind_nom_pens_ult1": 0,
+        "ind_recibo_ult1": 0
+      }'
+```
+
+Ответ содержит top-k продуктов:
+
+```json
+{
+  "prediction": 0,
+  "product": "no_purchase",
+  "confidence": 0.891,
+  "top_k": [
+    {"code": 0, "product": "no_purchase", "probability": 0.891},
+    {"code": 24, "product": "ind_recibo_ult1", "probability": 0.025}
+  ]
+}
+```
+
+## Нагрузочное тестирование
+
+Сервис должен быть поднят на `LOAD_TEST_URL` (по умолчанию `http://localhost:8079/predict`).
+
+```bash
+python load_test.py
+```
+
+Параметры задаются через `.env`/переменные окружения:
+
+```bash
+LOAD_TEST_WORKERS=50 \
+LOAD_TEST_MAX_TIME=50 \
+LOAD_TEST_P95_SLO_MS=5000 \
+LOAD_TEST_MIN_SUCCESS_RATE=99.0 \
+python load_test.py
+```
+
+Последний сохранённый отчёт (`artifacts/load_test_report.html`):
+
+| total_requests | success_rate | avg_latency | p95_latency | p99_latency | RPS |
+|---:|---:|---:|---:|---:|---:|
+| 1 408 | 99.01% | 1 822 мс | 2 483 мс | 2 671 мс | 27.56 |
+
+SLO последнего прогона выполнены: `success_rate ≥ 99%`, `p95 < 5000 мс`.
+В отчёте зафиксировано 14 ответов `HTTP 422` на 1 408 запросов; это валидируемые
+ошибки входного профиля, а не 5xx-падения сервиса.
+
+## Prometheus и Grafana
+
+Инфраструктура лежит в `fastapi/docker-compose.yaml` и поднимает три контейнера:
+
+1. `ml_service` — FastAPI-сервис на `8079`;
+2. `prometheus` — сбор метрик на `9090`;
+3. `grafana` — дашборд на `3000`.
+
+### Быстрый запуск всего стека
+
+```bash
+cp .env.example .env        # опционально: можно оставить значения по умолчанию
+# отредактируйте .env, если нужны другие порты или пароль Grafana
+
+docker compose --env-file .env -f fastapi/docker-compose.yaml up --build
+```
+
+Если `.env` не нужен, можно запустить с дефолтами:
 
 ```bash
 docker compose -f fastapi/docker-compose.yaml up --build
 ```
 
-Производительность: предобработка одного запроса — ~18 мс CPU (pandas/numpy,
-без featuretools). При 50 конкурентных клиентах на 2 vCPU сервис держит
-~26 RPS с p95 ≈ 2.2 с; SLO нагрузочного теста (`success_rate ≥ 99%`,
-`p95 < 5000 мс`) выполняется с запасом. Раньше featuretools-DFS на каждый
-запрос стоил ~250 мс и падал гонкой потоков (`KeyError: 'DataFrame main does
-not exist'` в каждом четвёртом конкурентном запросе → HTTP 500 →
-success_rate ~70%). Пул потоков эндпоинтов ограничен
-(`THREAD_POOL_TOKENS`, по умолчанию 10): меньше потоков — меньше
-переключений GIL при CPU-bound обработке.
+Адреса по умолчанию:
 
-Сервис принимает `POST /predict` с JSON-профилем клиента (поля как в `columns.txt`,
-обязательно только `ncodpers`, неизвестные поля игнорируются) и отвечает
-`{"prediction": <код класса>, "product": <название продукта>, "confidence": <вероятность>,
-"top_k": [...]}`. `GET /health` возвращает статус сервиса и список загруженных артефактов.
-Если модель не найдена, `/predict` отвечает `503`; ошибки валидации — `422` с именем поля.
+| Компонент | URL | Примечание |
+|---|---|---|
+| FastAPI | `http://localhost:8079` | `/health`, `/predict`, `/metrics`, `/drift` |
+| Prometheus | `http://localhost:9090` | UI для запросов PromQL и статуса алертов |
+| Grafana | `http://localhost:3000` | логин/пароль из `.env`, по умолчанию `admin` / `admin` |
 
-### Мониторинг
+Переменные портов:
 
-`GET /metrics` отдаёт метрики в формате Prometheus: счётчик запросов
-`bank_recommender_requests_total`, гистограмму латентности
-`bank_recommender_predict_latency_seconds`, счётчик предсказаний по классам
-`bank_recommender_predictions_total` и gauge дрейфа `bank_recommender_drift_psi`
-(плюс стандартные `process_*`).
-Конфиг скрейпинга — `fastapi/prometheus/prometheus.yml`. Дашборд Grafana
-(`fastapi/grafana.json`: p95 латентности, CPU/память процесса, распределение
-предсказаний) загружается автоматически: compose маунтит его и каталог
-`fastapi/grafana/provisioning/` (датасорс Prometheus + провайдер дашбордов),
-поэтому после `docker compose up` дашборд «Bank Recommender» уже на месте —
-импортировать руками ничего не нужно. Порты и учётные данные задаются
-переменными окружения (см. `.env.example`: `VM_PORT`, `THE_PORT`,
-`PROMETHEUS_PORT`, `GRAFANA_PORT`, `GRAFANA_USER`, `GRAFANA_PASS`).
-Пример дашборда см. в `image.png`.
-
-**Алерты.** Правила лежат в `fastapi/prometheus/alerts.yml` и подключены через
-`rule_files`: простой сервиса (`up == 0`), p95 латентности > 2 с, доля 5xx > 1%
-и дрейф признаков (PSI > 0.25). Alertmanager не настроен — сработки видны в UI
-Prometheus (*Status → Alerts*) и через `/api/v1/alerts`; для уведомлений в почту
-или мессенджер добавьте alertmanager в `docker-compose.yaml` и блок `alerting`
-в `prometheus.yml`.
-
-**Дрейф-мониторинг.** Сервис копит сырые значения `age`/`antiguedad`/`renta`
-из запросов в скользящем окне (`drift.py`) и считает PSI против эталонных
-гистограмм обучающего запуска (секция `drift_reference` в
-`preprocessing_params.json`). Ко всему добавлены: JSON-отчёт `GET /drift`,
-метрика `bank_recommender_drift_psi` для Prometheus и алерт
-`BankRecommenderFeatureDrift`. Пропуски в запросе не наблюдаются — иначе
-медианы обучения «вымывали» бы сдвиг. Пока в файле нет `drift_reference`
-(артефакт прошлого запуска), монитор пассивен (`/drift` → `no_reference`).
-Размер окна и порог — `DRIFT_WINDOW_SIZE` / `DRIFT_MIN_SAMPLES`.
-
-### Версия модели
-
-Канонический экспорт — `fastapi/saved_model.pkl` (его читают и сервис, и
-`rec_sys.ipynb`); MLflow-модель (`runs:/<run_id>/model`) — только для истории
-экспериментов. Версия зафиксирована в `fastapi/model_version.json` (запуск до
-введения временного разбиения и train-only статистик из P3; переобучение
-обновит метрики и секцию `split`):
-
-| Параметр | Значение |
-|---|---|
-| MLflow run id | `e200be8d83f34a8dac0ad6a3eb785c42` (эксперимент `RecSys_Modeling`) |
-| Дата обучения | 2026-09-16 |
-| train / test | 715 129 / 306 484 объектов, 57 признаков (стратифицированное разбиение) |
-| Гиперпараметры | `n_estimators=32`, `max_depth=None`, `min_samples_split=20` |
-| CV ROC-AUC (train) | 0.9014 |
-| ROC-AUC ovr macro (test) | 0.9316 |
-| F1 macro / precision macro / recall macro | 0.4684 / 0.4009 / 0.6050 |
-| PR-AUC macro | 0.4210 |
-
-Полный per-class отчёт — `artifacts/classification_report.txt`, метрики ALS —
-`artifacts/als_metrics.csv` (precision@5 ≈ 0.043, recall@5 ≈ 0.138,
-hit_rate ≈ 0.180 — старая индексация ALS, см. CODE_REVIEW §P3.5).
-
-### Тестовый запрос к микросервису
-
-```bash
-curl -X POST "http://localhost:8079/predict" \
-  -H "Content-Type: application/json" \
-  -d '{"fecha_dato": "2015-05-28", "ncodpers": 444579, "ind_empleado": null, "pais_residencia": "NI", "sexo": "H", "age": 116, "fecha_alta": "1998-07-01", "ind_nuevo": 1.0, "antiguedad": 213, "indrel": 1.0, "ult_fec_cli_1t": "2015-11-24", "indrel_1mes": "4.0", "tiprel_1mes": "R", "indresi": "S", "indext": "N", "conyuemp": null, "canal_entrada": "KCE", "indfall": "S", "tipodom": 1.0, "cod_prov": 23.0, "nomprov": "SALAMANCA", "ind_actividad_cliente": 0.0, "renta": 63830.06999999999, "segmento": "03 - UNIVERSITARIO", "ind_ahor_fin_ult1": 1, "ind_aval_fin_ult1": 0, "ind_cco_fin_ult1": 1, "ind_cder_fin_ult1": 1, "ind_cno_fin_ult1": 1, "ind_ctju_fin_ult1": 0, "ind_ctma_fin_ult1": 1, "ind_ctop_fin_ult1": 1, "ind_ctpp_fin_ult1": 1, "ind_deco_fin_ult1": 0, "ind_deme_fin_ult1": 1, "ind_dela_fin_ult1": 0, "ind_ecue_fin_ult1": 0, "ind_fond_fin_ult1": 0, "ind_hip_fin_ult1": 1, "ind_plan_fin_ult1": 1, "ind_pres_fin_ult1": 1, "ind_reca_fin_ult1": 1, "ind_tjcr_fin_ult1": 0, "ind_valo_fin_ult1": 0, "ind_viv_fin_ult1": 1, "ind_nomina_ult1": 0.0, "ind_nom_pens_ult1": 1.0, "ind_recibo_ult1": 1}'
+```env
+VM_PORT=8079
+THE_PORT=8079
+PROMETHEUS_PORT=9090
+GRAFANA_PORT=3000
+GRAFANA_USER=admin
+GRAFANA_PASS=admin
 ```
 
-## Нагрузочное тестирование
+Для нелокального окружения обязательно смените `GRAFANA_PASS`. Внутренний `THE_PORT`
+лучше оставлять `8079`: Prometheus по умолчанию скрейпит `ml-service:8079`. Если меняете
+`THE_PORT`, одновременно поменяйте target в `fastapi/prometheus/prometheus.yml`.
 
-Запуск (сервис должен быть поднят на порту 8079):
-
-```bash
-python load_test.py        # полный прогон; код возврата 0 — SLO выполнены, 1 — нарушены
-```
-
-Тест шлёт запросы параллельно пулом воркеров, использует реальные профили клиентов
-из датасета, проверяет схему каждого ответа и SLO — по итогам формируются
-`artifacts/load_test_report.html` и `artifacts/load_test_report.png`.
-Код возврата по SLO позволяет гонять тест в CI без ноутбука; для интерактивной
-работы остаётся `test.ipynb` (тонкая обёртка над тем же модулем).
-Параметры задаются переменными окружения (см. `.env.example`): `LOAD_TEST_URL`,
-`LOAD_TEST_WORKERS`, `LOAD_TEST_MAX_TIME`, `LOAD_TEST_SAMPLES`,
-`LOAD_TEST_P95_SLO_MS`, `LOAD_TEST_MIN_SUCCESS_RATE`, `LOAD_TEST_DATA_PATH`,
-`LOAD_TEST_FIRST_ROWS`, `LOAD_TEST_REPORT_DIR`.
-
-## Разработка
+### Что проверить после запуска
 
 ```bash
-pip install -r requirements.txt -r requirements-dev.txt
-pytest          # unit-тесты предобработки, API и smoke-тесты артефактов
-ruff check .    # линтер (pyflakes + pycodestyle)
+curl http://localhost:8079/health
+curl http://localhost:8079/metrics | grep bank_recommender
 ```
 
-Чтобы не коммитить вывод ячеек ноутбуков (`nbstripout`, CODE_REVIEW §7.1):
+Затем создайте трафик, иначе графики будут пустыми:
 
 ```bash
-pip install nbstripout && nbstripout --install
+LOAD_TEST_MAX_TIME=60 LOAD_TEST_WORKERS=20 python load_test.py
 ```
 
-(`.gitattributes` уже содержит фильтр; без установленного `nbstripout` git его игнорирует.)
+### Как пользоваться Prometheus
 
-## Ограничения и известные проблемы
+1. Откройте `http://localhost:9090`.
+2. Перейдите в **Status → Targets**. У job `bank-recommender` должен быть статус `UP`.
+   Если статус `DOWN`, проверьте, что контейнер `ml_service` запущен и что target в
+   `fastapi/prometheus/prometheus.yml` равен `ml-service:8079`.
+3. На вкладке **Graph** выполните полезные PromQL-запросы:
 
-Проведено code review (`CODE_REVIEW.md`); планы P0–P3 выполнены. В P3 устранены
-оставшиеся огрехи из этого списка:
+   ```promql
+   # RPS по всем эндпоинтам
+   sum(rate(bank_recommender_requests_total[1m]))
 
-- **Предобработка (исправлено в P3).** Раньше медианы, моды, квантили клиппинга, наборы
-  редких категорий, когорты дат и агрегаты считались на всём датасете до разбиения
-  (умеренная утечка). Теперь все статистики обучаются только на train
-  (`fit_preprocessing_params` в `preprocessing.py`), а к test и к продовым профилям
-  применяется одна и та же функция `apply_preprocessing`/`prepare_features`.
-- **Валидация (исправлено в P3).** Разбиение стратифицированное заменено временным
-  (`temporal_split` по дате привлечения `fecha_alta`: train — старые клиенты,
-  test — новые; разбиение по дате среза оказалось вырожденным из-за оттока —
-  см. CODE_REVIEW §P3.3). Профили одного клиента не смешиваются — метрики больше
-  не оптимистичны за счёт «подглядывания». Качество ALS теперь считается в двух скоупах: на клиентах обоих
-  годов (как раньше) и на всех покупателях 2016 года, включая cold-start, —
-  честная оценка (`artifacts/als_metrics.csv`, колонка `scope`). Попутно исправлена
-  индексация ALS-матрицы (строки — user_map-индексы, как и вызовы `recommend`;
-  раньше использовались сырые `ncodpers`, и рекомендации приписывались чужим
-  клиентам — см. CODE_REVIEW §3.7).
-- **Редкие категории (исправлено в P3).** На проде сворачивание редких категорий
-  сравнивается в строковом домене — как при обучении; раньше float-значения
-  (`cod_prov`, `ind_nuevo` и др.) не матчились со строковыми ключами словаря
-  и не сворачивались (OHE молча занулял такие категории).
-- **Инфраструктура (исправлено в P3).** Добавлены алерты Prometheus
-  (`fastapi/prometheus/alerts.yml`: простой, p95 > 2 с, 5xx > 1%, дрейф) и
-  дрейф-мониторинг признаков (PSI по `age`/`antiguedad`/`renta`: `GET /drift`,
-  метрика `bank_recommender_drift_psi`, алерт `BankRecommenderFeatureDrift`).
-  Alertmanager не настроен: сработки смотрятся в UI Prometheus; для уведомлений
-  — подключите alertmanager. Нагрузочный прогон вынесен в `load_test.py`
-  с кодом возврата по SLO — можно гонять в CI. Отчёты перенесены в `artifacts/`.
-- **Зависимости (исправлено в P3).** `requirements.txt` не резолвился
-  (`mlflow==2.7.1` требовал `numpy<2` и `pyarrow<14` при пинах
-  `numpy==2.2.5`/`pyarrow==19.0.1`) — mlflow обновлён до 2.22.1.
+   # p95 латентности /predict
+   histogram_quantile(0.95,
+     sum(rate(bank_recommender_predict_latency_seconds_bucket[5m])) by (le)
+   )
 
-Остающиеся оговорки:
+   # доля 5xx-ошибок
+   sum(rate(bank_recommender_requests_total{status=~"5.."}[5m]))
+     /
+   sum(rate(bank_recommender_requests_total[5m]))
 
-- **Таргет.** Целевая переменная многоклассовая: код первого купленного в 2016 году продукта
-  из шорт-листа, `0` — покупки не было, `other` — куплен редкий продукт. Шорт-лист ограничен
-  продуктами с долей покупок ≥ 1%: редкие продукты предсказываются только как `other`,
-  а не как отдельный класс. Модель предсказывает один продукт, а не ранжирование всего списка.
-- **Качество ALS** (используется и как признак `recommended_product_id`, и как бейзлайн)
-  остаётся базовым — фактические значения precision@k / recall@k см. в
-  `artifacts/als_metrics.csv`.
-- **Закоммиченные артефакты** (`fastapi/preprocessing_params.json`,
-  `fastapi/model_version.json`, `fastapi/personal_als.parquet`, отчёты в `artifacts/`)
-  получены предыдущим запуском — ещё до P3 (стратифицированное разбиение, статистики
-  на всём датасете, новая секция `drift_reference` отсутствует, поэтому
-  `/drift` → `no_reference` до переобучения). Прогон актуального `modeling.ipynb`
-  на реальных данных обновит их (как в P1 — изменения вступают в силу после
-  переобучения; модель и сервис при этом совместимы в обе стороны).
-- **Артефакты обучения** (`fastapi/saved_model.pkl` и др.) в репозитории лежат частично:
-  модель нужно получить, прогнав `loader.ipynb` → `modeling.ipynb`
-  (см. «Данные» и «Развёртывание»). По-хорошему конвейер артефактов должен идти из
-  model registry/пайплайна, а не из git.
+   # распределение предсказаний по классам
+   sum by (prediction) (rate(bank_recommender_predictions_total[5m]))
+
+   # PSI-дрейф по признакам, если в preprocessing_params.json есть drift_reference
+   bank_recommender_drift_psi
+
+   # CPU и память процесса сервиса
+   rate(process_cpu_seconds_total[5m])
+   process_resident_memory_bytes
+   ```
+
+4. Алерты смотрите в **Status → Rules** и **Alerts**. Подключены правила:
+   - `BankRecommenderDown` — сервис не скрейпится 2 минуты;
+   - `BankRecommenderHighLatencyP95` — p95 `/predict` выше 2 секунд 10 минут;
+   - `BankRecommenderHighErrorRate` — доля 5xx выше 1%;
+   - `BankRecommenderFeatureDrift` — PSI выше 0.25.
+
+Alertmanager в compose не добавлен: сработки видны в UI Prometheus. Для уведомлений
+в почту/Slack/Telegram добавьте контейнер Alertmanager и блок `alerting` в
+`fastapi/prometheus/prometheus.yml`.
+
+### Как пользоваться Grafana
+
+1. Откройте `http://localhost:3000`.
+2. Войдите под `GRAFANA_USER` / `GRAFANA_PASS` (`admin` / `admin` по умолчанию).
+3. Откройте **Dashboards → Bank Recommender**. Дашборд автоматически загружается из
+   `fastapi/grafana.json`, а datasource Prometheus — из
+   `fastapi/grafana/provisioning/datasources/prometheus.yml`.
+4. На дашборде доступны панели:
+   - p95 латентности `/predict`;
+   - success rate / error rate;
+   - RPS;
+   - распределение предсказаний по классам;
+   - CPU и память процесса;
+   - PSI-дрейф входных признаков.
+5. Если панель пустая, проверьте:
+   - был ли трафик после запуска (`load_test.py`);
+   - в Prometheus target `bank-recommender` находится в состоянии `UP`;
+   - datasource в Grafana называется `Prometheus` и имеет UID `prometheus`.
+6. Если дашборд не появился автоматически: **Dashboards → New → Import → Upload JSON**,
+   выберите `fastapi/grafana.json`, datasource — `Prometheus`.
+
+### Дрейф входных признаков
+
+`GET /drift` возвращает JSON-отчёт по PSI. Метрика в Prometheus называется
+`bank_recommender_drift_psi{feature="..."}`.
+
+Важно: PSI появляется только если в `fastapi/preprocessing_params.json` есть непустая
+секция `drift_reference` и накоплено не меньше `DRIFT_MIN_SAMPLES` наблюдений. Если секции
+нет или она равна `null`, `/drift` вернёт `status: "no_reference"`; пересоздайте артефакты
+запуском `modeling.ipynb`.
+
+## Ограничения текущей версии
+
+- Модель выдаёт один основной класс и top-k вероятностей, а не оптимизирует отдельный
+  ранжировщик всех 24 продуктов.
+- Редкие продукты объединены в `other`, поэтому отдельные рекомендации для них не
+  интерпретируются как самостоятельные продуктовые классы.
+- `fastapi/saved_model.pkl` не хранится в Git и должен быть создан локальным обучающим
+  запуском или доставлен из внешнего model registry.
+- Без непустого `drift_reference` в `preprocessing_params.json` дрейф-мониторинг работает в
+  пассивном режиме.

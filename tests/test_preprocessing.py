@@ -1,8 +1,8 @@
-"""Unit-тесты общего модуля предобработки (CODE_REVIEW §P2.16).
+"""Unit-тесты общего модуля предобработки.
 
 Чистые функции и сквозной `prepare_features` тестируются без тяжёлых
 зависимостей: арифметика признаков считается pandas/numpy. Тест на паритет
-с featuretools (эталонная семантика старой DFS-версии) скипается, если
+с featuretools (паритет с DFS-семантикой) скипается, если
 featuretools не установлен.
 """
 
@@ -74,7 +74,7 @@ def test_add_age_interval_clips_out_of_range():
 
 
 def test_fold_rare_categories_keeps_frequent_values():
-    """Регрессия CODE_REVIEW §1.4: частотные значения не превращаются в NaN."""
+    """Частотные значения при сворачивании редких категорий не превращаются в NaN."""
     df = pd.DataFrame({'pais_residencia': ['ES', 'ES', 'XX'], 'sexo': ['V', 'H', 'V']})
     replacer = {'pais_residencia': {'XX': 'other'}}
     out = preprocessing.fold_rare_categories(df, replacer)
@@ -101,7 +101,7 @@ def test_fill_missing_uses_medians_and_modes():
 
 
 def test_fill_missing_before_bins_leaves_no_nans():
-    """Регрессия CODE_REVIEW §2.1: fillna — до расчёта бинов."""
+    """Пропуски заполняются до расчёта возрастных бинов."""
     df = pd.DataFrame({'age': [np.nan], 'antiguedad': [np.nan], 'renta': [np.nan]})
     df = preprocessing.fill_missing(df, LEGACY_MEDIANS, LEGACY_MODES)
     df = preprocessing.add_age_interval(df, LEGACY_AGE_INTERVALS)
@@ -192,7 +192,7 @@ def test_manual_transformations_unseen_category_uses_default():
     assert first['mean_renta_by_pais_residencia'] == pytest.approx(200.0)  # mean по train
     assert first['median_antiguedad_by_segmento'] == pytest.approx(20.0)  # median по train
     assert not served[['mean_renta_by_pais_residencia', 'renta_vs_country_mean']].isna().any().any()
-    # агрегаты старого формата (без '__default__') — fallback через среднее значений
+    # агрегаты резервного формата (без '__default__') — fallback через среднее значений
     legacy_aggregates = {key: {cat: val for cat, val in values.items() if cat != '__default__'}
                          for key, values in aggregates.items()}
     served_legacy, _ = preprocessing.manual_transformations(pd.DataFrame({
@@ -212,13 +212,13 @@ def test_add_total_products_sums_flags():
 
 def test_preprocessing_params_legacy_fallback(tmp_path):
     params = PreprocessingParams.from_json(tmp_path / 'absent.json')
-    assert params.source == 'legacy-константы'
+    assert params.source == 'запасные константы'
     assert params.medians == LEGACY_MEDIANS
     assert params.aggregates == {}
 
 
 def test_preprocessing_params_partial_file_fills_legacy(tmp_path):
-    """Неполный файл: недостающие секции добираются из legacy."""
+    """Неполный файл: недостающие секции добираются из резервных констант."""
     payload = {'created_at': '2026-01-01',
                'medians': {'age': 30.0, 'antiguedad': 1.0, 'renta': 5.0},
                'label_map': {'0': 'no_purchase'}}
@@ -249,7 +249,7 @@ def test_prepare_features_golden(legacy_params, tiny_personal_recs):
     assert first['renta'] == pytest.approx(120000.0)
     assert first['antiguedad'] == pytest.approx(66.0)
     assert first['log_renta'] == pytest.approx(np.log1p(120000.0))
-    # legacy-режим без агрегатов: среднее по одной строке — само значение
+    # резервный режим без агрегатов: среднее по одной строке — само значение
     assert first['renta_vs_country_mean'] == pytest.approx(1.0)
     assert first['mean_renta_by_pais_residencia'] == '120000.0'
     # когорты дат считаются по ходу пайплайна, но модель их не использует —
@@ -400,7 +400,7 @@ def test_fold_rare_categories_matches_training_semantics():
         '02 - PARTICULARES', '03 - UNIVERSITARIO', '#']
 
 
-# --- P3: статистики только на train, временное разбиение ---------------------
+# --- Статистики только на train, временное разбиение -------------------------
 
 
 def make_raw_clients(n=60, seed=42):
@@ -461,7 +461,7 @@ def test_fit_preprocessing_params_computed_on_fit_frame():
 def test_fit_apply_train_serve_parity(tiny_personal_recs):
     """Строка применённой батч-предобработки == prepare_features того же профиля.
 
-    Главный train/serve-инвариант P2 теперь работает и в новом режиме
+    Train/serve-инвариант работает и для параметров, обученных на train.
     «fit на train → apply на test»: признаки одного и того же клиента
     совпадают между офлайном и продом один в один.
     """

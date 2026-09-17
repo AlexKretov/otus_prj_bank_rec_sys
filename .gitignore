@@ -4,9 +4,9 @@ __pycache__/
 data/
 # Секреты (ключи Kaggle, адрес MLflow) — шаблон лежит в .env.example
 .env
-# Артефакты обучения вне data/ (CODE_REVIEW §7.5): пересоздаются прогоном
-# modeling.ipynb. Уже закоммиченные файлы (fastapi/personal_als.parquet и др.)
-# остаются в git — игнор действует только на новые.
+# Артефакты обучения вне data/ пересоздаются прогоном modeling.ipynb.
+# Уже закоммиченные файлы (fastapi/personal_als.parquet и др.) остаются в git —
+# игнор действует только на новые.
 mlruns/
 mlruns_artifacts/
 *.parquet

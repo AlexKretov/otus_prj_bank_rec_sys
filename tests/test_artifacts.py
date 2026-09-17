@@ -1,4 +1,4 @@
-"""Smoke-тесты артефактов репозитория (CODE_REVIEW §P2.16).
+"""Smoke-тесты артефактов репозитория.
 
 Проверяют файлы, которые лежат в git или появляются после `modeling.ipynb`.
 Каждый тест скипается, если его файла нет, — набор остаётся зелёным
@@ -31,7 +31,7 @@ def test_preprocessing_params_shape():
 
 
 def test_personal_recs_indexed_by_ncodpers():
-    """Регрессия CODE_REVIEW §1.5: lookup идёт по ID клиента, дубли вычищены."""
+    """Проверяем, что lookup ALS-рекомендаций идёт по ID клиента, а дубли вычищены."""
     path = ARTIFACTS_DIR / 'personal_als.parquet'
     if not path.exists():
         pytest.skip('нет personal_als.parquet')
@@ -43,7 +43,7 @@ def test_personal_recs_indexed_by_ncodpers():
 
 
 def test_model_version_file_shape():
-    """Версия модели зафиксирована (CODE_REVIEW §P2.20)."""
+    """Версия модели зафиксирована в JSON-артефакте."""
     path = ARTIFACTS_DIR / 'model_version.json'
     if not path.exists():
         pytest.skip('нет model_version.json')

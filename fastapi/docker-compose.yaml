@@ -1,9 +1,10 @@
 # Инфраструктура микросервиса: API + Prometheus + Grafana.
 # Запуск из корня репозитория:
 #   docker compose -f fastapi/docker-compose.yaml up --build
-# Все порты/учётки — через переменные окружения со значениями по умолчанию
-# (см. .env.example): VM_PORT, THE_PORT, PROMETHEUS_PORT, GRAFANA_PORT,
-# GRAFANA_USER, GRAFANA_PASS, LOG_LEVEL.
+# Порты, учётка Grafana и параметры сервиса — через переменные окружения
+# со значениями по умолчанию (см. .env.example): VM_PORT, THE_PORT,
+# PROMETHEUS_PORT, GRAFANA_PORT, GRAFANA_USER, GRAFANA_PASS, LOG_LEVEL,
+# THREAD_POOL_TOKENS, DRIFT_WINDOW_SIZE, DRIFT_MIN_SAMPLES.
 services:
   ml_service:
     build:
@@ -11,15 +12,22 @@ services:
       dockerfile: fastapi/Dockerfile
     environment:
       THE_PORT: ${THE_PORT:-8079}
-      ARTIFACTS_DIR: fastapi
+      ARTIFACTS_DIR: ${ARTIFACTS_DIR:-fastapi}
+      MODEL_PATH: ${MODEL_PATH:-fastapi/saved_model.pkl}
+      PARAMS_PATH: ${PARAMS_PATH:-fastapi/preprocessing_params.json}
+      REPLACER_PATH: ${REPLACER_PATH:-fastapi/replacer.json}
+      PERSONAL_RECS_PATH: ${PERSONAL_RECS_PATH:-fastapi/personal_als.parquet}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      THREAD_POOL_TOKENS: ${THREAD_POOL_TOKENS:-10}
+      DRIFT_WINDOW_SIZE: ${DRIFT_WINDOW_SIZE:-2000}
+      DRIFT_MIN_SAMPLES: ${DRIFT_MIN_SAMPLES:-200}
     ports:
       - "${VM_PORT:-8079}:${THE_PORT:-8079}"
     networks:
       default:
         aliases:
-          # prometheus.yml скрейпит ml-service:8079 — alias гарантирует,
-          # что имя разрешается (hostname: сам по себе DNS-псевдонимом не является)
+          # prometheus.yml по умолчанию скрейпит ml-service:8079 — alias гарантирует,
+          # что имя разрешается. Если меняете THE_PORT, поменяйте target в prometheus.yml.
           - ml-service
     hostname: ml-service
 

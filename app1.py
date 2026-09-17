@@ -16,8 +16,8 @@
                      входных значений age/antiguedad/renta против эталонных
                      гистограмм обучения, см. drift.py).
 
-Предобработка вынесена в общий модуль `preprocessing.py` (CODE_REVIEW §P2.14) —
-сервис и обучение используют одни и те же функции и константы.
+Предобработка вынесена в общий модуль `preprocessing.py`: сервис и обучение
+используют одни и те же функции и константы.
 
 Артефакты (каталог `fastapi/`, переопределяется переменной окружения `ARTIFACTS_DIR`):
     saved_model.pkl            — sklearn-пайплайн (modeling.ipynb → joblib.dump);
@@ -27,10 +27,9 @@
     replacer.json              — словарь сворачивания редких категорий;
     personal_als.parquet       — персональные ALS-рекомендации, индекс — `ncodpers`.
 
-Если `preprocessing_params.json` отсутствует (не переобучали после правок
-CODE_REVIEW §P1.10), сервис работает на legacy-константах из `preprocessing.py`
-и пишет об этом предупреждение в лог: такие константы могли разойтись
-с обучающим запуском.
+Если `preprocessing_params.json` отсутствует, сервис работает на запасных
+константах из `preprocessing.py` и пишет об этом предупреждение в лог: такие
+константы могут отличаться от последнего обучающего запуска.
 
 Переменные окружения: ARTIFACTS_DIR, MODEL_PATH, PARAMS_PATH, REPLACER_PATH,
 PERSONAL_RECS_PATH, LOG_LEVEL, DRIFT_WINDOW_SIZE, DRIFT_MIN_SAMPLES.
@@ -173,7 +172,7 @@ def _load_model():
 
 PARAMS = PreprocessingParams.from_json(PARAMS_PATH)
 if not PARAMS.replacer:
-    # replacer отдельно от preprocessing_params.json — старый формат артефактов
+    # поддержка артефактов, где replacer сохранён отдельным файлом
     PARAMS.replacer = load_json(REPLACER_PATH) or {}
 # Код класса → название продукта (0 — «покупки не ожидается»).
 LABEL_MAP = dict(PARAMS.label_map)
@@ -402,10 +401,9 @@ def predict(profile: ClientProfile) -> PredictionResponse:
     """Скорит профиль клиента.
 
     Обычный `def`, а не `async def`: внутри CPU-bound pandas, uvicorn сам
-    вынесет вызов в thread pool и не заблокирует event loop
-    (CODE_REVIEW §2.3). Сама предобработка потокобезопасна: общих
-    мутируемых структур нет (раньше featuretools-DFS на каждый запрос
-    падал гонкой потоков — см. docstring `feature_engineering`).
+    вынесет вызов в thread pool и не заблокирует event loop. Сама предобработка
+    потокобезопасна: общих мутируемых структур нет; арифметические признаки
+    считаются напрямую pandas/numpy.
     """
     started = time.perf_counter()
     if MODEL is None:

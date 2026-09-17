@@ -1,13 +1,12 @@
-"""Общая предобработка для обучения и сервиса (CODE_REVIEW §4.1, §P2.14).
+"""Общая предобработка для обучения и сервиса.
 
-До P2 функции предобработки существовали в трёх копиях (`modeling.ipynb`,
-`rec_sys.ipynb`, `app1.py`) и расходились друг с другом. Этот модуль — единый
-источник истины: обучение (`modeling.ipynb`) и сервис (`app1.py`) используют
-одни и те же функции и константы, поэтому train/serve skew исключён по построению.
+Модуль — единый источник истины для обучения (`modeling.ipynb`), офлайн-проверки
+(`rec_sys.ipynb`) и сервиса (`app1.py`): все они используют одни и те же функции
+и константы, поэтому train/serve skew минимизируется по построению.
 
 Импорт модуля лёгкий: чистые функции (бины, когорты, клиппинг, сворачивание
-редких категорий, арифметика `feature_engineering`) работают на одном
-pandas/numpy и не тянут тяжёлых зависимостей.
+редких категорий, арифметика `feature_engineering`) работают на pandas/numpy
+и не тянут тяжёлых зависимостей.
 """
 
 from __future__ import annotations
@@ -40,7 +39,7 @@ NO_PURCHASE_CLASS = 0  # в 2016 году клиент ничего не куп�
 OTHER_CLASS = 99  # первым куплен продукт вне шорт-листа
 
 # Признаки, на которых обучена модель (см. modeling.ipynb, ячейка обучения).
-# Держим их явными списками — без позиционной магии `cats[:-24]` (CODE_REVIEW §4.2).
+# Держим их явными списками — без позиционной магии вроде `cats[:-24]`.
 NUMERIC_FEATURES = [
     'antiguedad', 'renta', 'antiguedad + renta', 'antiguedad / renta', 'renta / antiguedad',
     'antiguedad * renta', 'NATURAL_LOGARITHM(antiguedad)', 'NATURAL_LOGARITHM(renta)',
@@ -69,9 +68,9 @@ BASE_COLUMNS = [
     'recommended_product_id',
 ]
 
-# --- Legacy-константы предобработки -----------------------------------------
-# Значения последнего обучающего запуска до появления preprocessing_params.json.
-# Пересчитываются в modeling.ipynb и сериализуются в артефакт (CODE_REVIEW §P1.10).
+# --- Запасные константы предобработки ----------------------------------------
+# Используются только если preprocessing_params.json отсутствует или неполон.
+# При штатном запуске они пересчитываются в modeling.ipynb и сериализуются.
 LEGACY_MEDIANS: Dict[str, float] = {'age': 39.0, 'antiguedad': 50.0, 'renta': 101850.0}
 LEGACY_MODES: Dict[str, Any] = {
     'ind_empleado': 'N', 'pais_residencia': 'ES', 'sexo': 'V', 'fecha_alta': '2014-07-28',
@@ -88,7 +87,7 @@ LEGACY_CLIP_BOUNDS: Dict[str, List[float]] = {
 LEGACY_AGE_INTERVALS: List[List[int]] = [
     [2, 23], [24, 28], [29, 36], [37, 41], [42, 45], [46, 49], [50, 54], [55, 63], [64, 164],
 ]
-# Когорты дат из обучающего запуска (могут расходиться с обучением — см. CODE_REVIEW §2.2).
+# Когорты дат из сохранённого обучающего запуска для резервного режима.
 LEGACY_DATE_INTERVALS: Dict[str, List[str]] = {
     'fecha_alta': [
         '2014-08-13 – 2015-02-27', '2012-07-23 – 2012-12-10', '2013-10-18 – 2014-08-13',
@@ -110,8 +109,8 @@ class PreprocessingParams:
     """Параметры предобработки из обучающего запуска.
 
     Сервис читает их из `preprocessing_params.json`; чего в файле нет —
-    берётся из legacy-констант (с предупреждением в лог). Поле `source`
-    говорит, откуда параметры: путь к файлу или `'legacy-константы'`.
+    берётся из запасных констант (с предупреждением в лог). Поле `source`
+    говорит, откуда параметры: путь к файлу или `'запасные константы'`.
     """
 
     medians: Dict[str, float] = field(default_factory=lambda: dict(LEGACY_MEDIANS))
@@ -128,22 +127,22 @@ class PreprocessingParams:
     feature_columns: Dict[str, List[str]] = field(default_factory=dict)
     drift_reference: Optional[Dict[str, Any]] = None
     created_at: Optional[str] = None
-    source: str = 'legacy-константы'
+    source: str = 'запасные константы'
 
     @classmethod
     def from_dict(cls, payload: Optional[dict], source: str) -> 'PreprocessingParams':
-        """Собирает параметры из словаря; отсутствующие секции — из legacy."""
+        """Собирает параметры из словаря; отсутствующие секции — из резервных констант."""
         if not payload:
             logger.warning(
-                'Параметры предобработки %s не найдены — работаю на legacy-константах. '
-                'Они могли разойтись с обучающим запуском: запустите modeling.ipynb, '
-                'чтобы артефакт пересобрался (CODE_REVIEW §P1.10).', source,
+                'Параметры предобработки %s не найдены — работаю на запасных константах. '
+                'Они могут отличаться от последнего обучающего запуска: запустите '
+                'modeling.ipynb, чтобы артефакт пересобрался.', source,
             )
             return cls()
         for key in ('medians', 'modes', 'clip_bounds', 'age_intervals', 'date_cohorts',
                     'aggregates', 'replacer', 'label_map', 'feature_columns'):
             if key not in payload:
-                logger.warning('В %s нет секции %s — использую legacy-значения', source, key)
+                logger.warning('В %s нет секции %s — использую резервные значения', source, key)
         return cls(
             medians=payload.get('medians') or dict(LEGACY_MEDIANS),
             modes=payload.get('modes') or dict(LEGACY_MODES),
@@ -162,7 +161,7 @@ class PreprocessingParams:
 
     @classmethod
     def from_json(cls, path: Path) -> 'PreprocessingParams':
-        """Читает `preprocessing_params.json`; при проблемах — legacy-константы."""
+        """Читает `preprocessing_params.json`; при проблемах — запасные константы."""
         params = load_json(path)
         if params is not None:
             logger.info('Параметры предобработки загружены: %s (сохранены %s)',
@@ -183,12 +182,12 @@ def load_json(path: Path) -> Optional[dict]:
 
 
 def load_personal_recs(path: Path) -> Optional[pd.DataFrame]:
-    """Персональные ALS-рекомендации с индексом по `ncodpers` (CODE_REVIEW §1.5)."""
+    """Персональные ALS-рекомендации с индексом по `ncodpers`."""
     if not path.exists():
         logger.warning('Персональные рекомендации не найдены: %s', path)
         return None
     recs = pd.read_parquet(path)
-    if 'ncodpers' in recs.columns:  # старый формат файла — индекс не сохранён
+    if 'ncodpers' in recs.columns:  # резервный формат файла — индекс не сохранён
         recs = recs.set_index('ncodpers')
     duplicated = int(recs.index.duplicated().sum())
     if duplicated:
@@ -202,7 +201,7 @@ def load_personal_recs(path: Path) -> Optional[pd.DataFrame]:
 
 @lru_cache(maxsize=None)
 def _parse_interval_bounds(interval: str) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Границы legacy-интервала 'YYYY-MM-DD – YYYY-MM-DD', разобранные один раз.
+    """Границы резервного интервала 'YYYY-MM-DD – YYYY-MM-DD', разобранные один раз.
 
     Без кэша find_interval парсил по 24 строки дат на каждое значение —
     на инференсе это ~8 мс на запрос только на парсинг.
@@ -212,10 +211,9 @@ def _parse_interval_bounds(interval: str) -> tuple[pd.Timestamp, pd.Timestamp]:
 
 
 def find_interval(input_date: Any, intervals: List[str]) -> Optional[str]:
-    """Legacy-маппинг даты в интервал вида 'YYYY-MM-DD – YYYY-MM-DD'.
+    """Резервный маппинг даты в интервал вида 'YYYY-MM-DD – YYYY-MM-DD'.
 
-    Используется, только если нет `date_cohorts` из обучающего запуска
-    (CODE_REVIEW §2.2: границы когорт могли разойтись с обучением).
+    Используется, только если в артефакте нет `date_cohorts` из обучающего запуска.
     """
     if input_date is None or (isinstance(input_date, float) and np.isnan(input_date)):
         return None
@@ -303,7 +301,7 @@ def add_age_interval(df: pd.DataFrame, age_intervals: List[List[int]]) -> pd.Dat
 
 def add_date_cohorts(df: pd.DataFrame, date_cohorts: Dict[str, Any],
                      date_intervals: Dict[str, List[str]]) -> pd.DataFrame:
-    """Когорты дат: спецификация из обучения, иначе legacy-интервалы."""
+    """Когорты дат: спецификация из обучения, иначе резервные интервалы."""
     for col in ('fecha_alta', 'ult_fec_cli_1t'):
         if col not in df.columns:
             continue
@@ -323,12 +321,8 @@ def fold_rare_categories(df: pd.DataFrame, replacer: Dict[str, Dict[str, str]],
     колонки приводились к str до подсчёта частот). Поэтому для словарей со
     строковыми ключами сравнение ведём в строковом домене: значения колонки
     приводятся к str, и float `28.0` из запроса матчится с ключом `'28.0'`
-    ровно так же, как на обучении. Раньше сравнение шло в исходном домене,
-    и float-значения не матчились со строковыми ключами — редкие `cod_prov`,
-    `ind_nuevo` и т.п. на проде не сворачивались (train/serve skew:
-    OHE с handle_unknown='ignore' молча занулял такие категории).
-    Словари с нестроковыми ключами (ручные/тестовые) обрабатываются
-    в исходном (числовом) домене — прежнее поведение.
+    ровно так же, как на обучении. Словари с нестроковыми ключами
+    (ручные/тестовые) обрабатываются в исходном числовом домене.
 
     Пустые словари — тождественное преобразование — пропускаются.
     """
@@ -409,13 +403,12 @@ def manual_transformations(df: pd.DataFrame,
     """Ручные и агрегатные признаки.
 
     На обучении (`aggregates=None`) групповые статистики считаются по
-    переданному фрейму (modeling.ipynb передаёт train-часть — без утечки из
-    теста, CODE_REVIEW §3.4) и возвращаются для сериализации в
+    переданному train-фрейму и возвращаются для сериализации в
     `preprocessing_params.json`. На проде сохранённые агрегаты применяются
-    через `map` — иначе статистики считались бы по одной строке запроса
-    (CODE_REVIEW §2.4). Если переданных агрегатов не хватает (legacy-режим
-    без артефакта), недостающие считаются по входному фрейму — для одной
-    строки это вырожденный, но рабочий режим.
+    через `map` — иначе статистики считались бы по одной строке запроса.
+    Если переданных агрегатов не хватает (резервный режим без артефакта),
+    недостающие считаются по входному фрейму — для одной строки это
+    вырожденный, но рабочий режим.
 
     В каждый словарь агрегатов при обучении добавляется ключ '__default__' —
     глобальная статистика по train-фрейму. При apply категория, которой не
@@ -436,7 +429,7 @@ def manual_transformations(df: pd.DataFrame,
         antiguedad_key = f'median_antiguedad_by_{col}'
         if stored.get(renta_key) and stored.get(antiguedad_key):
             renta_default = stored[renta_key].get('__default__')
-            if renta_default is None:  # агрегаты от старого запуска без fallback
+            if renta_default is None:  # агрегаты от сохранённого запуска без fallback
                 renta_default = float(np.mean(list(stored[renta_key].values())))
             antiguedad_default = stored[antiguedad_key].get('__default__')
             if antiguedad_default is None:
@@ -448,7 +441,7 @@ def manual_transformations(df: pd.DataFrame,
         else:
             if aggregates is not None:
                 logger.warning('Агрегаты для %s не найдены в параметрах — считаю по входным '
-                               'данным (см. CODE_REVIEW §2.4)', col)
+                               'данным', col)
             # astype(float): featuretools отдает категориальные колонки как category,
             # а map по ним сохраняет category-dtype и ломает арифметику ниже
             stored[renta_key] = {
@@ -481,13 +474,10 @@ def feature_engineering(df: pd.DataFrame,
     Возвращает (матрица признаков, агрегаты): на обучении агрегаты уезжают
     в `preprocessing_params.json`, на проде — приходят оттуда же.
 
-    Арифметические признаки считаются напрямую pandas/numpy. Раньше здесь
-    на каждый запрос строился featuretools EntitySet и запускался DFS — это
-    стоило ~250 мс на запрос и, главное, падало под нагрузкой: featuretools/
-    woodwork не потокобезопасны, и при ~50 конкурентных запросах каждый
-    четвёртый падал с `KeyError: 'DataFrame main does not exist in bank_data'`
-    (HTTP 500 → success_rate ~70% в test.ipynb). Значения воспроизводят
-    семантику DFS побитово (проверяется тестом на паритет с featuretools):
+    Арифметические признаки считаются напрямую pandas/numpy: это быстрее и
+    надёжнее для единичных запросов сервиса, чем строить featuretools EntitySet
+    и запускать DFS на каждый профиль. Значения воспроизводят семантику DFS
+    побитово (проверяется тестом на паритет с featuretools):
     те же имена колонок, чистые numpy-операции (log(0) → -inf, log(x<0)/sqrt(x<0)
     → NaN, деление на ноль → inf) и приведение нечисловых колонок к category —
     так делал woodwork, и на этом держится авто-детект числовых/категориальных
@@ -533,14 +523,13 @@ def feature_engineering(df: pd.DataFrame,
     # чтобы результат не зависел от индекса входного фрейма
     df = df.reset_index(drop=True)
     df, aggregates_out = manual_transformations(df, aggregates)
-    # Удаляем дубликаты колонок, которые порождала старая DFS-версия
+    # Удаляем дубликаты колонок после объединения производных признаков
     return df.loc[:, ~df.columns.duplicated()], aggregates_out
 
 
-# --- Обучение параметров предобработки (train-only, CODE_REVIEW §3.4) --------
-# Производные/служебные колонки: в сворачивании редких категорий и модах
-# не участвуют (в старом ноутбучном пайплайне список категориальных колонок
-# фиксировался до их появления — сохраняем то поведение).
+# --- Обучение параметров предобработки (только на train) ----------------------
+# Производные/служебные колонки не участвуют в сворачивании редких категорий
+# и расчёте мод: они создаются отдельными шагами после базовой очистки.
 _DERIVED_COLUMNS = frozenset({'age_interval', 'total_products', 'recommended_product_id'})
 
 # Числовые колонки с медианами и квантильным клиппингом.
@@ -580,11 +569,10 @@ def calculate_age_intervals(df: pd.DataFrame, n_intervals: int = 3) -> list:
 def create_time_cohorts(series: pd.Series, max_cohorts: int = 30) -> tuple:
     """Возвращает (метки когорт, спецификация когорт для сервиса).
 
-    Перенесено из modeling.ipynb без изменений. Спецификация описывает
-    границы когорт в днях от base_date, чтобы сервис применял ровно те же
-    интервалы, что и обучение (CODE_REVIEW §2.2, §P1.10): интервал i
-    покрывает (left_days, right_days], где left_days — правый день
-    предыдущего бина, right_days — максимальный день бина.
+    Спецификация описывает границы когорт в днях от base_date, чтобы сервис
+    применял ровно те же интервалы, что и обучение: интервал i покрывает
+    (left_days, right_days], где left_days — правый день предыдущего бина,
+    right_days — максимальный день бина.
     """
     series_dt = pd.to_datetime(series)
     base_date = series_dt.min().normalize()
@@ -689,12 +677,10 @@ def fit_preprocessing_params(fit_df: pd.DataFrame, *, rare_threshold: float = 0.
                              drift_bins: int = 10) -> PreprocessingParams:
     """Обучает статистики предобработки на train-части (без утечки из теста).
 
-    Раньше медианы, моды, квантили клиппинга, наборы редких категорий, когорты
-    дат и возрастные бины считались по ВСЕМУ датасету до сплита — умеренная,
-    но реальная утечка (CODE_REVIEW §3.4). Теперь fit выполняется только на
-    train, а test трансформируется `apply_preprocessing` с теми же параметрами —
-    тем самым сохраняется train/serve-согласованность: и обучение, и прод
-    проходят один и тот же кодовый путь.
+    Медианы, моды, квантили клиппинга, наборы редких категорий, когорты дат
+    и возрастные бины считаются только на train. Test и продовые профили
+    трансформируются `apply_preprocessing` с теми же параметрами — так сохраняется
+    train/serve-согласованность.
 
     Колонку таргета (`purchase`) функция удаляет, если она есть во фрейме:
     таргет не должен влиять на статистики. Агрегаты (`mean_renta_by_*` и др.)
@@ -712,7 +698,7 @@ def fit_preprocessing_params(fit_df: pd.DataFrame, *, rare_threshold: float = 0.
         if not mode.empty:
             modes[col] = mode.iloc[0]
 
-    # Порядок повторяет старый обучающий пайплайн и прод: fillna → бины
+    # Порядок повторяет обучающий и продовый пайплайн: fillna → бины
     # возраста → когорты дат → сворачивание редких категорий → клиппинг.
     work = fill_missing(df, medians, modes)
 
@@ -793,9 +779,8 @@ def temporal_split(dates: pd.Series, test_size: float = 0.3) -> tuple:
     По дате среза (`fecha_dato` последнего наблюдения) разбивать нельзя: посадив
     в train клиентов с ранней последней датой, мы получили бы почти одних
     ушедших из банка клиентов с таргетом 0 (проверено экспериментально).
-    NaT уезжает в train. В отличие от стратифицированного сплита здесь нет
-    «подглядывания в будущее», и профили одного клиента не смешиваются
-    (CODE_REVIEW §3.4).
+    NaT уезжает в train. В отличие от случайного сплита здесь нет
+    «подглядывания в будущее», и профили одного клиента не смешиваются.
     """
     normalized = pd.to_datetime(pd.Series(dates)).dt.normalize()
     unique_dates = np.sort(normalized.dropna().unique())
@@ -818,8 +803,8 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
                      personal_recs: Optional[pd.DataFrame] = None) -> pd.DataFrame:
     """Превращает профиль клиента в матрицу признаков той же формы, что и на обучении.
 
-    Порядок шагов повторяет обучение (CODE_REVIEW §2.1): сначала fillna
-    медиан/мод, и только потом — возрастные бины и когорты дат. Базовые
+    Порядок шагов повторяет обучение: сначала fillna медиан/мод, и только
+    потом — возрастные бины и когорты дат. Базовые
     трансформации общие для прода и обучения — `apply_preprocessing`.
     Бросает ValueError, если в профиле нет обязательных колонок.
     """
@@ -847,9 +832,8 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
     # Списки числовых/категориальных признаков — из артефакта этого же запуска
     # (автодетект в modeling.ipynb зависит от данных: число уникальных значений
     # числовой колонки может упасть ниже 25, и она станет категориальной).
-    # Раньше здесь стояли зашитые константы прошлого запуска — после
-    # переобучения с другим автоходом детектом сервис приводил типы иначе,
-    # чем модель (train/serve skew, TypeError в OneHotEncoder).
+    # Списки берутся из артефакта этого же запуска; если их нет, используем
+    # константы модуля как резерв.
     feature_columns = params.feature_columns or {}
     numeric_features = feature_columns.get('numeric') or NUMERIC_FEATURES
     categorical_features = feature_columns.get('categorical') or CATEGORICAL_FEATURES

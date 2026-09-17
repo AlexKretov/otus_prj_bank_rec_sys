@@ -1,4 +1,4 @@
-# Инструменты разработчика: тесты и линтер (CODE_REVIEW §P2.16, §P2.17).
+# Инструменты разработчика: тесты и линтер.
 # Установка: pip install -r requirements.txt -r requirements-dev.txt
 # Запуск: pytest; ruff check .
 pytest==8.3.5

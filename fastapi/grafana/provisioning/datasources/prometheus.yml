@@ -1,7 +1,6 @@
 # Автоматическое подключение Prometheus к Grafana при старте контейнера
 # (docker compose маунтит этот каталог в /etc/grafana/provisioning).
-# uid совпадает с датасорсом в fastapi/grafana.json — раньше дашборд ссылался
-# на uid из ручной настройки (ben0zzjsb1lvkc), которого в новом контейнере нет.
+# uid совпадает с датасорсом в fastapi/grafana.json.
 apiVersion: 1
 
 datasources:

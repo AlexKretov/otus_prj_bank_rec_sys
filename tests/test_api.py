@@ -1,4 +1,4 @@
-"""Тесты HTTP-сервиса: happy path, валидация, деградация (CODE_REVIEW §P2.16)."""
+"""Тесты HTTP-сервиса: happy path, валидация и деградация."""
 
 import json
 
