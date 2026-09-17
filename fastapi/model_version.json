@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-09-16T10:31:27+00:00",
+  "created_at": "2026-09-17T13:15:05+00:00",
   "model_path": "fastapi/saved_model.pkl",
-  "mlflow_run_id": "e200be8d83f34a8dac0ad6a3eb785c42",
+  "mlflow_run_id": "01ba6df2ddd0498590fcf00ef77f77d0",
   "mlflow_run_name": "fit",
   "experiment": "RecSys_Modeling",
   "dataset": "data/train_ver2.csv",
@@ -25,32 +25,63 @@
       "99": "other"
     }
   },
+  "split": {
+    "type": "temporal_fecha_alta",
+    "cutoff": "2013-10-09",
+    "test_size": 0.3,
+    "definition": "train: клиенты, привлечённые до cutoff (fecha_alta); test: более новые клиенты",
+    "fit": "статистики предобработки и агрегаты обучены только на train"
+  },
   "train_shape": [
-    715129,
+    644744,
     57
   ],
   "test_shape": [
-    306484,
+    275674,
     57
   ],
   "best_params": {
-    "classifier__n_estimators": 32,
-    "classifier__max_depth": null,
-    "classifier__min_samples_split": 20
+    "classifier__n_estimators": 42,
+    "classifier__max_depth": 10,
+    "classifier__min_samples_split": 11
   },
-  "cv_roc_auc_mean": 0.9014,
+  "cv_roc_auc_mean": 0.9622,
   "metrics": {
-    "roc_auc_ovr_macro": 0.9316,
-    "accuracy": 0.7861,
-    "precision_weighted": 0.86,
-    "recall_weighted": 0.7861,
-    "f1_weighted": 0.8136,
-    "precision_macro": 0.4009,
-    "recall_macro": 0.605,
-    "f1_macro": 0.4684,
-    "pr_auc_macro": 0.421,
-    "cv_roc_auc_std": 0.0033,
-    "optuna_trials": 5
+    "roc_auc_ovr_macro": 0.9594,
+    "accuracy": 0.934,
+    "precision_weighted": 0.9564,
+    "recall_weighted": 0.934,
+    "f1_weighted": 0.9367,
+    "precision_macro": 0.3235,
+    "recall_macro": 0.3362,
+    "f1_macro": 0.2816,
+    "pr_auc_macro": 0.3437,
+    "optuna_trials": 6
+  },
+  "baseline": {
+    "no_purchase_accuracy": 0.9046,
+    "accuracy_lift_pp": 2.94,
+    "product_classes_mean_pr_auc": 0.2963,
+    "product_classes_mean_random_pr_auc": 0.00931,
+    "product_classes_pr_auc_lift": 31.8,
+    "definition": "Для PR-AUC случайный бейзлайн равен доле класса в test; product_classes исключают no_purchase и other и берут классы с ненулевым support."
+  },
+  "als_metrics": {
+    "k": 5,
+    "common_users_2015_2016": {
+      "users": 94091,
+      "precision_at_k": 0.03181813350904975,
+      "recall_at_k": 0.09596100229210727,
+      "hit_rate": 0.13364721386742623,
+      "relevant_per_user": 1.5106652070867563
+    },
+    "all_users_2016": {
+      "users": 115867,
+      "precision_at_k": 0.025838245574667507,
+      "recall_at_k": 0.07792612794554675,
+      "hit_rate": 0.10852960722207358,
+      "relevant_per_user": 1.537348856879008
+    }
   },
   "label_map": {
     "0": "no_purchase",
@@ -67,5 +98,9 @@
     "23": "ind_nom_pens_ult1",
     "24": "ind_recibo_ult1",
     "99": "other"
-  }
+  },
+  "notes": [
+    "Числа синхронизированы с последними выводами modeling.ipynb и artifacts/classification_report.txt.",
+    "fastapi/saved_model.pkl не хранится в Git из-за размера и создаётся запуском modeling.ipynb."
+  ]
 }

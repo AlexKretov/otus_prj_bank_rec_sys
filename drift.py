@@ -1,7 +1,6 @@
 """Мониторинг дрейфа входных признаков микросервиса (PSI).
 
-Закрывает пробел «дрейф-мониторинга признаков нет» из README («Ограничения»):
-сервис копит сытые числовые значения входных запросов в скользящем окне
+Сервис копит сырые числовые значения входных запросов в скользящем окне
 и при скрейпе `/metrics` (и по запросу `GET /drift`) считает PSI окна против
 эталонных гистограмм обучающего запуска. Эталон (`drift_reference`) пишется
 в `fastapi/preprocessing_params.json` ноутбуком modeling.ipynb
@@ -46,8 +45,8 @@ class DriftMonitor:
     """Скользящее окно наблюдений + PSI против эталона обучения.
 
     Потокобезопасен: `observe` вызывается из пула потоков uvicorn.
-    Если эталона нет (`drift_reference` отсутствует в параметрах обучения),
-    монитор пассивен: `observe` — no-op, отчёт — status 'no_reference'.
+    Если эталона нет (`drift_reference` отсутствует или равен null), монитор
+    пассивен: `observe` — no-op, отчёт — status 'no_reference'.
     """
 
     def __init__(self, reference: Optional[Dict[str, Any]] = None,
@@ -110,7 +109,7 @@ class DriftMonitor:
         """Отчёт по всем отслеживаемым признакам (для GET /drift)."""
         if not self.enabled:
             return {'status': 'no_reference',
-                    'detail': 'в preprocessing_params.json нет секции drift_reference — '
+                    'detail': 'в preprocessing_params.json нет непустой секции drift_reference — '
                               'переобучите модель актуальным modeling.ipynb'}
         features = {}
         for feature in self.reference:

@@ -21,6 +21,13 @@
       "99": "other"
     }
   },
+  "split": {
+    "type": "temporal_fecha_alta",
+    "cutoff": "2013-10-09",
+    "test_size": 0.3,
+    "definition": "train: клиенты, привлечённые до cutoff (fecha_alta); test: более новые клиенты",
+    "fit": "статистики предобработки и агрегаты обучены только на train"
+  },
   "medians": {
     "age": 39.0,
     "antiguedad": 50.0,
@@ -607,6 +614,7 @@
     "ind_actividad_cliente": {},
     "segmento": {}
   },
+  "drift_reference": null,
   "label_map": {
     "0": "no_purchase",
     "3": "ind_cco_fin_ult1",
@@ -685,5 +693,9 @@
       "mean_renta_by_segmento",
       "median_antiguedad_by_segmento"
     ]
-  }
+  },
+  "notes": [
+    "Файл содержит параметры предобработки для сервиса; при полном запуске modeling.ipynb секции split и drift_reference пересоздаются автоматически.",
+    "Если drift_reference равен null, GET /drift работает в режиме no_reference."
+  ]
 }

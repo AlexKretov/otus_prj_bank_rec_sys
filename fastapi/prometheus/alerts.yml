@@ -1,5 +1,4 @@
 # Правила алертов микросервиса (подключаются в prometheus.yml через rule_files).
-# Закрывают пробел «алертов нет» из README («Ограничения»).
 # Alertmanager не настроен: сработки видны в UI Prometheus (Status → Alerts)
 # и через /api/v1/alerts. Для уведомлений в почту/мессенджер добавьте
 # alertmanager в docker-compose.yaml и блок alerting в prometheus.yml.

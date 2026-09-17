@@ -1,8 +1,7 @@
 """Нагрузочный тест микросервиса рекомендаций (можно запускать из CI).
 
-Раньше прогон существовал только как ноутбук `test.ipynb` и выполнялся
-вручную (README, «Ограничения»). Теперь вся логика живёт здесь,
-а ноутбук — тонкая интерактивная обёртка над этим модулем.
+Вся логика живёт здесь, а `test.ipynb` — тонкая интерактивная обёртка
+над этим модулем.
 
 Запуск (сервис должен быть поднят):
     python load_test.py                     # прогон по переменным окружения
@@ -15,8 +14,7 @@
 
 Результаты:
     artifacts/load_test_report.html, artifacts/load_test_report.png.
-    Код возврата 0 — SLO выполнены, 1 — нарушены (AssertionError) или
-    прогон не состоялся.
+    Код возврата 0 — SLO выполнены, 1 — нарушены или прогон не состоялся.
 """
 
 from __future__ import annotations
@@ -82,9 +80,8 @@ def load_label_classes(params_path='fastapi/preprocessing_params.json'):
 def load_profiles(path=DATA_PATH, n=N_PROFILES, seed=42, first_rows=FIRST_ROWS):
     """Реальные профили клиентов — целые строки датасета.
 
-    Раньше профиль собирался из несовместимых значений разных строк
-    (возраст 116 + сегмент «UNIVERSITARIO») — такие запросы нерепрезентативны
-    (CODE_REVIEW §5.3). Читаем только первые строки: для выборки достаточно.
+    Профили берутся целыми строками датасета, чтобы не смешивать несовместимые
+    значения разных клиентов. Читаем только первые строки: для выборки достаточно.
     """
     sample = pd.read_csv(path, nrows=first_rows).sample(
         min(n, first_rows), random_state=seed)
@@ -137,9 +134,8 @@ def send_request(url, profile, label_map, timeout=30):
 def run_load_test(profiles, url, max_time, workers, label_map, verbose=True):
     """Шлёт запросы параллельно через пул воркеров, пока не выйдет время.
 
-    Раньше Executor создавался, но запросы шли последовательно в цикле `while`
-    (~1.8 RPS), и p95/p99 ничего не значили (CODE_REVIEW §5.1). Теперь фьючерсы
-    реально выполняются конкурентно, а очередь ограничена числом воркеров.
+    Фьючерсы реально выполняются конкурентно, а очередь ограничена числом
+    воркеров, поэтому p95/p99 отражают поведение сервиса под параллельной нагрузкой.
     """
     results, profile_index, submitted = [], 0, set()
     started = time.time()
@@ -172,8 +168,7 @@ def generate_report(results_df, *, url=URL, workers=WORKERS,
                     report_dir=REPORT_DIR, eps=1e-9):
     """Считает метрики, рисует графики, пишет HTML-отчёт.
 
-    Возвращает dict с метриками и флагом slo_ok. Нарушение SLO — не
-    AssertionError (assert отключается под -O), а явный ValueError ниже.
+    Возвращает dict с метриками и флагом slo_ok. Нарушение SLO — явный ValueError ниже, чтобы код возврата был надёжным.
     """
     ok = float(results_df['success'].mean() * 100)
     latencies = results_df.loc[results_df['success'], 'latency']
@@ -271,6 +266,6 @@ def main() -> int:
 if __name__ == '__main__':
     try:
         sys.exit(main())
-    except (AssertionError, ValueError) as exc:
+    except ValueError as exc:
         print(f'LOAD TEST FAILED: {exc}', file=sys.stderr)
         sys.exit(1)
