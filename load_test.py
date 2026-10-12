@@ -168,7 +168,8 @@ def generate_report(results_df, *, url=URL, workers=WORKERS,
                     report_dir=REPORT_DIR, eps=1e-9):
     """Считает метрики, рисует графики, пишет HTML-отчёт.
 
-    Возвращает dict с метриками и флагом slo_ok. Нарушение SLO — явный ValueError ниже, чтобы код возврата был надёжным.
+    Возвращает dict с метриками и флагом slo_ok. Нарушение SLO — явный ValueError
+    ниже, чтобы код возврата был надёжным.
     """
     ok = float(results_df['success'].mean() * 100)
     latencies = results_df.loc[results_df['success'], 'latency']

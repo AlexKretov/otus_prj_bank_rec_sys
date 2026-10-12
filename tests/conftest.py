@@ -8,6 +8,7 @@
 import logging
 import warnings
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -118,3 +119,66 @@ def tiny_model_bundle():
     ])
     model.fit(X, y)
     return {'model': model, 'label_map': {0: 'no_purchase', 3: 'ind_cco_fin_ult1'}}
+
+
+def make_raw_panel(n_clients: int = 150, n_snapshots: int = 5, seed: int = 7) -> pd.DataFrame:
+    """Синтетическая панель в схеме `train_ver2.csv` для сквозных проверок.
+
+    Каждая строка — клиент в месячном снимке. Клиенты появляются не в первом
+    снимке (есть cold start для ALS), часть уходит, продукты покупаются
+    с вероятностью, зависящей от клиента: данных достаточно, чтобы прогнать
+    весь путь «события → таргет → ALS-признак → предобработка → модель → метрики»
+    без настоящего датасета.
+    """
+    rng = np.random.default_rng(seed)
+    snapshots = pd.date_range('2015-02-28', periods=n_snapshots, freq='ME')
+    records = []
+    for offset in range(n_clients):
+        client_id = 10_000 + offset
+        join_index = int(rng.integers(0, max(n_snapshots - 1, 1)))
+        propensity = float(rng.uniform(0.05, 0.7))
+        age = float(int(rng.normal(45, 15)))
+        renta = float(np.round(rng.uniform(20_000.0, 250_000.0), 2))
+        antiguedad = float(int(rng.integers(0, 200)))
+        fecha_alta = (snapshots[join_index] - pd.Timedelta(days=int(antiguedad) * 30)
+                      ).strftime('%Y-%m-%d')
+        product_state = {product: 0 for product in PRODUCTS}
+        product_state['ind_cco_fin_ult1'] = 1
+        for snapshot_index in range(join_index, n_snapshots):
+            if snapshot_index > join_index and rng.random() < 0.05:
+                break
+            if rng.random() < propensity:
+                available = [product for product, value in product_state.items() if value == 0]
+                if available:
+                    product_state[str(rng.choice(available))] = 1
+            records.append({
+                'ncodpers': client_id,
+                'fecha_dato': snapshots[snapshot_index],
+                'fecha_alta': fecha_alta,
+                'ind_empleado': str(rng.choice(['N', 'A', 'S'])),
+                'pais_residencia': str(rng.choice(['ES', 'FR'], p=[0.9, 0.1])),
+                'sexo': str(rng.choice(['H', 'V'])),
+                'age': age,
+                'ind_nuevo': int(snapshot_index == join_index),
+                'antiguedad': antiguedad + 30 * (snapshot_index - join_index),
+                'indrel': 1.0,
+                # Дата последнего выхода из банка: заполнена у части клиентов,
+                # иначе когорты дат в fit_preprocessing_params вырождаются.
+                'ult_fec_cli_1t': (snapshots[max(snapshot_index - 1, 0)]
+                                   .strftime('%Y-%m-%d') if rng.random() < 0.3 else None),
+                'indrel_1mes': '1.0',
+                'tiprel_1mes': str(rng.choice(['A', 'I'])),
+                'indresi': 'S',
+                'indext': 'N',
+                'conyuemp': 'N',
+                'canal_entrada': str(rng.choice(['KHE', 'KAT'])),
+                'indfall': 'N',
+                'tipodom': 1.0,
+                'cod_prov': float(rng.choice([28.0, 8.0])),
+                'nomprov': str(rng.choice(['MADRID', 'BARCELONA'])),
+                'ind_actividad_cliente': int(rng.random() < 0.5),
+                'renta': renta,
+                'segmento': str(rng.choice(['02 - PARTICULARES', '03 - UNIVERSITARIO'])),
+                **product_state,
+            })
+    return pd.DataFrame(records)
