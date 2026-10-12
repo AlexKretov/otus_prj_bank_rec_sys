@@ -1,7 +1,7 @@
 {
-  "created_at": "2026-09-17T13:15:05+00:00",
+  "created_at": "2026-10-12T17:54:33",
   "model_path": "fastapi/saved_model.pkl",
-  "mlflow_run_id": "01ba6df2ddd0498590fcf00ef77f77d0",
+  "mlflow_run_id": "c0de098c36604315ab771d51c7ecb033",
   "mlflow_run_name": "fit",
   "experiment": "RecSys_Modeling",
   "dataset": "data/train_ver2.csv",
@@ -27,44 +27,43 @@
   },
   "split": {
     "type": "temporal_fecha_alta",
-    "cutoff": "2013-10-09",
+    "cutoff": "2016-01-01",
     "test_size": 0.3,
-    "definition": "train: клиенты, привлечённые до cutoff (fecha_alta); test: более новые клиенты",
+    "definition": "train: клиенты, привлечённые до cutoff (fecha_alta); test: новее",
     "fit": "статистики предобработки и агрегаты обучены только на train"
   },
   "train_shape": [
-    644744,
+    8399876,
     57
   ],
   "test_shape": [
-    275674,
+    3690523,
     57
   ],
   "best_params": {
-    "classifier__n_estimators": 42,
-    "classifier__max_depth": 10,
-    "classifier__min_samples_split": 11
+    "classifier__n_estimators": 22,
+    "classifier__max_depth": 1,
+    "classifier__min_samples_split": 3
   },
-  "cv_roc_auc_mean": 0.9622,
+  "cv_roc_auc_mean": 0.7390895308966415,
   "metrics": {
-    "roc_auc_ovr_macro": 0.9594,
-    "accuracy": 0.934,
-    "precision_weighted": 0.9564,
-    "recall_weighted": 0.934,
-    "f1_weighted": 0.9367,
-    "precision_macro": 0.3235,
-    "recall_macro": 0.3362,
-    "f1_macro": 0.2816,
-    "pr_auc_macro": 0.3437,
-    "optuna_trials": 6
+    "roc_auc_ovr_macro": 0.7729,
+    "accuracy": 0.4142,
+    "precision_weighted": 0.9668,
+    "recall_weighted": 0.4142,
+    "f1_weighted": 0.574,
+    "precision_macro": 0.0835,
+    "recall_macro": 0.2663,
+    "f1_macro": 0.0597,
+    "pr_auc_macro": 0.0983,
+    "optuna_trials": 1.0
   },
   "baseline": {
-    "no_purchase_accuracy": 0.9046,
-    "accuracy_lift_pp": 2.94,
-    "product_classes_mean_pr_auc": 0.2963,
-    "product_classes_mean_random_pr_auc": 0.00931,
-    "product_classes_pr_auc_lift": 31.8,
-    "definition": "Для PR-AUC случайный бейзлайн равен доле класса в test; product_classes исключают no_purchase и other и берут классы с ненулевым support."
+    "no_purchase_accuracy": 0.9679,
+    "accuracy_lift_pp": -55.3701,
+    "product_classes_mean_pr_auc": 0.0318,
+    "product_classes_mean_random_pr_auc": 0.0026,
+    "product_classes_pr_auc_lift": 12.1897
   },
   "als_metrics": {
     "k": 5,
@@ -100,7 +99,7 @@
     "99": "other"
   },
   "notes": [
-    "Числа синхронизированы с последними выводами modeling.ipynb и artifacts/classification_report.txt.",
+    "Числа синхронизированы с выводами modeling.ipynb и artifacts/classification_report.txt.",
     "fastapi/saved_model.pkl не хранится в Git из-за размера и создаётся запуском modeling.ipynb."
   ]
 }

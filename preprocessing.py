@@ -6,22 +6,36 @@
 
 Импорт модуля лёгкий: чистые функции (бины, когорты, клиппинг, сворачивание
 редких категорий, арифметика `feature_engineering`) работают на pandas/numpy
-и не тянут тяжёлых зависимостей.
+и не тянут тяжёлых зависимостей. `tqdm` — опционален: если его нет,
+прогресс-бары молча отключаются.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import numpy as np
 import pandas as pd
 
+try:  # прогресс-бары нужны только для больших батчей, зависимость опциональна
+    from tqdm.auto import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:  # pragma: no cover — tqdm почти всегда есть в окружении
+    _HAS_TQDM = False
+    _tqdm = None
+
 logger = logging.getLogger('bank_recommender.preprocessing')
+
+# Батчи меньше этого размера не показывают прогресс-бар: инференс API — одна
+# строка на запрос, и любой tqdm в этом случае был бы шумом в логах.
+PROGRESS_MIN_ROWS = 1000
 
 # Продукты банка: значения соответствуют `ind_*_ult1`, код целевой переменной
 # `purchase` в modeling.ipynb — позиция в этом списке + 1.
@@ -104,6 +118,40 @@ LEGACY_DATE_INTERVALS: Dict[str, List[str]] = {
 }
 
 
+# --- Утилиты логирования и прогресса -----------------------------------------
+
+@contextmanager
+def _timed(stage: str, level: int = logging.INFO) -> Iterator[None]:
+    """Замеряет и логирует длительность стадии.
+
+    INFO — для стадий обучения (минуты, важны в отчёте), DEBUG — для мелких
+    шагов инференса, где INFO был бы шумом (десятки миллисекунд на запрос).
+    """
+    start = time.perf_counter()
+    logger.log(level, '%s — старт', stage)
+    try:
+        yield
+    finally:
+        logger.log(level, '%s — готово за %.2f с', stage, time.perf_counter() - start)
+
+
+def _progress(iterable, *, desc: Optional[str] = None, disable: bool = False, **kwargs):
+    """tqdm-обёртка: молчит для мелких батчей и при отсутствии tqdm.
+
+    Инференс API обрабатывает одну строку на запрос — прогресс-бар там был бы
+    бесполезен, а `disable=True` его гасит. Порог `PROGRESS_MIN_ROWS`
+    применяется вызывающей стороной: `disable=len(df) < PROGRESS_MIN_ROWS`.
+    """
+    if disable or not _HAS_TQDM:
+        return iterable
+    return _tqdm(iterable, desc=desc, leave=False, **kwargs)
+
+
+def _shape(df: pd.DataFrame) -> str:
+    """Короткое описание формы фрейма для логов: '1234×57'."""
+    return f'{len(df)}×{df.shape[1]}'
+
+
 @dataclass
 class PreprocessingParams:
     """Параметры предобработки из обучающего запуска.
@@ -143,7 +191,7 @@ class PreprocessingParams:
                     'aggregates', 'replacer', 'label_map', 'feature_columns'):
             if key not in payload:
                 logger.warning('В %s нет секции %s — использую резервные значения', source, key)
-        return cls(
+        params = cls(
             medians=payload.get('medians') or dict(LEGACY_MEDIANS),
             modes=payload.get('modes') or dict(LEGACY_MODES),
             clip_bounds=payload.get('clip_bounds') or dict(LEGACY_CLIP_BOUNDS),
@@ -158,6 +206,15 @@ class PreprocessingParams:
             created_at=payload.get('created_at'),
             source=source,
         )
+        logger.info(
+            'Параметры предобработки собраны из %s: медиан=%d, мод=%d, '
+            'clip-колонок=%d, возрастных бинов=%d, когорт=%s, агрегатов=%s, '
+            'replacer-колонок=%d, классов=%d',
+            source, len(params.medians), len(params.modes), len(params.clip_bounds),
+            len(params.age_intervals), list(params.date_cohorts), list(params.aggregates),
+            sum(1 for values in params.replacer.values() if values), len(params.label_map),
+        )
+        return params
 
     @classmethod
     def from_json(cls, path: Path) -> 'PreprocessingParams':
@@ -172,6 +229,7 @@ class PreprocessingParams:
 def load_json(path: Path) -> Optional[dict]:
     """Читает JSON-артефакт; при проблемах пишет в лог и возвращает None."""
     if not path.exists():
+        logger.debug('JSON-артефакт не найден: %s', path)
         return None
     try:
         with path.open(encoding='utf-8') as file:
@@ -186,7 +244,8 @@ def load_personal_recs(path: Path) -> Optional[pd.DataFrame]:
     if not path.exists():
         logger.warning('Персональные рекомендации не найдены: %s', path)
         return None
-    recs = pd.read_parquet(path)
+    with _timed(f'load_personal_recs: чтение {path}', level=logging.DEBUG):
+        recs = pd.read_parquet(path)
     if 'ncodpers' in recs.columns:  # резервный формат файла — индекс не сохранён
         recs = recs.set_index('ncodpers')
     duplicated = int(recs.index.duplicated().sum())
@@ -196,6 +255,8 @@ def load_personal_recs(path: Path) -> Optional[pd.DataFrame]:
         notna_first = np.argsort(~recs['recommended_product_id'].notna().to_numpy(), kind='stable')
         recs = recs.iloc[notna_first]
         recs = recs[~recs.index.duplicated(keep='first')]
+    logger.info('Персональные ALS-рекомендации: %s, уникальных клиентов: %s',
+                path, len(recs))
     return recs
 
 
@@ -254,11 +315,12 @@ def map_date_to_cohort(value: Any, cohort_spec: Dict[str, Any]) -> str:
 
 def coerce_numeric(df: pd.DataFrame) -> pd.DataFrame:
     """Приводит числовые колонки к числам; `-999999` в стаже — в NaN."""
-    for col in ('age', 'antiguedad', 'renta'):
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    if 'antiguedad' in df.columns:
-        df['antiguedad'] = df['antiguedad'].replace(np.float64(-999999.0), np.nan)
+    with _timed(f'coerce_numeric: {_shape(df)}', level=logging.DEBUG):
+        for col in ('age', 'antiguedad', 'renta'):
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        if 'antiguedad' in df.columns:
+            df['antiguedad'] = df['antiguedad'].replace(np.float64(-999999.0), np.nan)
     return df
 
 
@@ -283,6 +345,10 @@ def fill_missing(df: pd.DataFrame, medians: Dict[str, float],
             fills[col] = value
     if fills:
         df = df.fillna(fills)
+    logger.debug('fill_missing: заполнено колонок %d (медианы: %d, моды: %d)',
+                 len(fills),
+                 sum(1 for c in fills if c in ('age', 'antiguedad', 'renta')),
+                 len(fills) - sum(1 for c in fills if c in ('age', 'antiguedad', 'renta')))
     return df
 
 
@@ -296,20 +362,30 @@ def add_age_interval(df: pd.DataFrame, age_intervals: List[List[int]]) -> pd.Dat
     # ровно на границе (после clip) выпадал бы в NaN.
     age = df['age'].clip(lower=bins[0], upper=bins[-1])
     df['age_interval'] = pd.cut(age, bins=bins, labels=labels, include_lowest=True)
+    logger.debug('add_age_interval: интервалов %d, границы %s', len(age_intervals),
+                 f'{bins[0]}…{bins[-1]}')
     return df
 
 
 def add_date_cohorts(df: pd.DataFrame, date_cohorts: Dict[str, Any],
                      date_intervals: Dict[str, List[str]]) -> pd.DataFrame:
     """Когорты дат: спецификация из обучения, иначе резервные интервалы."""
+    processed: List[str] = []
     for col in ('fecha_alta', 'ult_fec_cli_1t'):
         if col not in df.columns:
             continue
         if date_cohorts.get(col):
             spec = date_cohorts[col]
             df[col] = df[col].apply(lambda value, spec=spec: map_date_to_cohort(value, spec))
+            logger.debug('add_date_cohorts: %s → %s (интервалов %d)',
+                         col, spec.get('mode'), len(spec.get('intervals', ())))
         else:
             df[col] = df[col].apply(lambda value: find_interval(value, date_intervals[col]))
+            logger.debug('add_date_cohorts: %s → резервные интервалы (%d шт.)',
+                         col, len(date_intervals[col]))
+        processed.append(col)
+    if not processed:
+        logger.debug('add_date_cohorts: колонок для когорт нет')
     return df
 
 
@@ -326,22 +402,34 @@ def fold_rare_categories(df: pd.DataFrame, replacer: Dict[str, Dict[str, str]],
 
     Пустые словари — тождественное преобразование — пропускаются.
     """
-    for col in CATEGORICAL_COLUMNS if columns is None else columns:
-        mapping = replacer.get(col)
-        if not mapping or col not in df.columns:
-            continue
+    target_columns = [
+        col for col in (CATEGORICAL_COLUMNS if columns is None else columns)
+        if replacer.get(col) and col in df.columns
+    ]
+    if not target_columns:
+        logger.debug('fold_rare_categories: нечего сворачивать')
+        return df
+
+    disable = len(df) < PROGRESS_MIN_ROWS
+    replaced_total = 0
+    for col in _progress(target_columns, desc='fold_rare_categories', disable=disable):
+        mapping = replacer[col]
         if all(isinstance(key, str) for key in mapping):
             values = df[col].astype(str)
             rare_mask = values.isin(mapping)
         else:  # числовые ключи: сравниваем в исходном домене
             values = df[col]
             rare_mask = values.isin(mapping)
-        if rare_mask.any():
+        n_replaced = int(rare_mask.sum())
+        replaced_total += n_replaced
+        if n_replaced:
             if isinstance(df[col].dtype, pd.CategoricalDtype):
                 # присвоение 'other' в category-dtype упало бы: значения нет
                 # в категориях — переводим колонку в object
                 df[col] = df[col].astype(object)
             df.loc[rare_mask, col] = values[rare_mask].map(mapping)
+    logger.debug('fold_rare_categories: колонок %d, значений свёрнуто %d',
+                 len(target_columns), replaced_total)
     return df
 
 
@@ -350,6 +438,7 @@ def clip_numbers(df: pd.DataFrame, clip_bounds: Dict[str, List[float]]) -> pd.Da
     for col, (lower, upper) in clip_bounds.items():
         if col in df.columns:
             df[col] = df[col].clip(lower=lower, upper=upper)
+    logger.debug('clip_numbers: колонок %d', len(clip_bounds))
     return df
 
 
@@ -379,6 +468,9 @@ def add_personal_recommendation(df: pd.DataFrame,
     recommendation, found = lookup_personal_recommendation(personal_recs, ncodpers)
     if not found:
         logger.info('Персональная ALS-рекомендация для ncodpers=%s не найдена — 0', ncodpers)
+    else:
+        logger.debug('Персональная ALS-рекомендация для ncodpers=%s: %s',
+                     ncodpers, recommendation)
     df['recommended_product_id'] = recommendation
     return df
 
@@ -394,6 +486,7 @@ def add_total_products(df: pd.DataFrame, products: Optional[List[str]] = None) -
     converted = df[columns].apply(pd.to_numeric, errors='coerce')
     df[columns] = converted
     df['total_products'] = converted.sum(axis=1)
+    logger.debug('add_total_products: продуктовых колонок %d', len(columns))
     return df
 
 
@@ -424,6 +517,10 @@ def manual_transformations(df: pd.DataFrame,
     extras: Dict[str, pd.Series] = {}
     extras['renta_antiguedad_ratio'] = df['renta'] / (df['antiguedad'] + 1)
     extras['log_renta'] = np.log1p(df['renta'])
+
+    mode = 'apply' if aggregates else 'fit'
+    logger.debug('manual_transformations[%s]: строк %d', mode, len(df))
+
     for col in ('pais_residencia', 'segmento'):
         renta_key = f'mean_renta_by_{col}'
         antiguedad_key = f'median_antiguedad_by_{col}'
@@ -460,9 +557,38 @@ def manual_transformations(df: pd.DataFrame,
                 df[col].map(stored[antiguedad_key])
                 .astype(float)
                 .fillna(stored[antiguedad_key]['__default__']))
+            logger.info('manual_transformations[fit]: посчитаны агрегаты по %s '
+                        '(%d категорий)', col, len(stored[renta_key]) - 1)
+
     extras['renta_vs_country_mean'] = df['renta'] / extras['mean_renta_by_pais_residencia']
     df = pd.concat([df, pd.DataFrame(extras, index=df.index)], axis=1)
     return df, stored
+
+
+def _sanitize_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Защита от inf/NaN в производных признаках.
+
+    Арифметика DFS порождает inf (деление на 0, log(0) = -inf) и NaN
+    (log/sqrt от отрицательных значений, 0/0). StandardScaler в
+    ColumnTransformer не принимает inf, RandomForest — NaN.
+    Заменяем inf на NaN и заполняем числовые признаки нулём:
+    детерминированно, без сохранения состояния, поэтому train/serve
+    согласованы по построению.
+
+    Возвращает тот же фрейм (in-place по числовым колонкам), чтобы не
+    копировать многомиллионный train ещё раз.
+    """
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    if len(numeric_cols) == 0:
+        return df
+    before_inf = int(np.isinf(df[numeric_cols].to_numpy()).sum())
+    before_nan = int(df[numeric_cols].isna().to_numpy().sum())
+    if before_inf or before_nan:
+        df[numeric_cols] = df[numeric_cols].replace([np.inf, -np.inf], np.nan)
+        df[numeric_cols] = df[numeric_cols].fillna(0.0)
+        logger.info('_sanitize_derived_features: inf=%d, NaN=%d в числовых колонках '
+                    'заменены (inf→NaN→0.0)', before_inf, before_nan)
+    return df
 
 
 def feature_engineering(df: pd.DataFrame,
@@ -486,7 +612,15 @@ def feature_engineering(df: pd.DataFrame,
     `cast_categories=False` пропускает приведение к category: оно нужно только
     обучению (dtype для авто-детекта в modeling.ipynb), а `prepare_features`
     на инференсе всё равно приводит признаки к str/numeric сразу после.
+
+    Дополнительно в конце вызывается `_sanitize_derived_features`: инф/NaN
+    из log/sqrt/деления не должны дойти до `StandardScaler` и
+    `RandomForestClassifier` — они падают на таких значениях.
     """
+    mode = 'fit' if aggregates is None else 'apply'
+    logger.info('feature_engineering[%s]: вход %s, категориальные → category=%s',
+                mode, _shape(df), cast_categories)
+
     # Колонки, которые DFS (woodwork Double) оставлял числовыми; остальные
     # приводились к Categorical — сохраняем, чтобы dtype после этой функции
     # не изменился по сравнению с featuretools-версией.
@@ -497,7 +631,11 @@ def feature_engineering(df: pd.DataFrame,
         'NATURAL_LOGARITHM(renta)', 'SQUARE_ROOT(antiguedad)', 'SQUARE_ROOT(renta)',
     }
     if cast_categories:
-        for col in df.columns:
+        # Прогресс-бар полезен: на train это ~50 колонок × миллионы строк,
+        # каждая astype('category') может занимать заметное время.
+        disable = len(df) < PROGRESS_MIN_ROWS
+        for col in _progress(list(df.columns), desc='feature_engineering: cast → category',
+                             disable=disable):
             if col not in numeric_columns:
                 df[col] = df[col].astype('category')
 
@@ -517,14 +655,22 @@ def feature_engineering(df: pd.DataFrame,
         }, index=df.index)
     # один concat вместо 8 присваиваний (порядок ключей = порядок колонок DFS)
     df = pd.concat([df, transforms], axis=1)
+    logger.debug('feature_engineering[%s]: добавлено арифметических признаков: %d',
+                 mode, len(transforms.columns))
 
     df = df.drop(columns=['unique_id', 'index'], errors='ignore')
     # DFS с make_index всегда возвращал свежий RangeIndex 0..n-1 — повторяем,
     # чтобы результат не зависел от индекса входного фрейма
     df = df.reset_index(drop=True)
     df, aggregates_out = manual_transformations(df, aggregates)
+    # inf/NaN из log(0), 0/0, sqrt(neg) ломают StandardScaler в ColumnTransformer
+    # и RandomForestClassifier — заменяем на конечные значения здесь.
+    df = _sanitize_derived_features(df)
     # Удаляем дубликаты колонок после объединения производных признаков
-    return df.loc[:, ~df.columns.duplicated()], aggregates_out
+    df = df.loc[:, ~df.columns.duplicated()]
+    logger.info('feature_engineering[%s]: выход %s, колонок модели (numeric=%d, cat=%d)',
+                mode, _shape(df), len(NUMERIC_FEATURES), len(CATEGORICAL_FEATURES))
+    return df, aggregates_out
 
 
 # --- Обучение параметров предобработки (только на train) ----------------------
@@ -563,6 +709,8 @@ def calculate_age_intervals(df: pd.DataFrame, n_intervals: int = 3) -> list:
         intervals.append((lower, upper))
         lower = upper + 1
     intervals.append((lower, age_groups['age'].iloc[-1]))
+    logger.info('calculate_age_intervals: n_intervals=%d, границы: %s',
+                n_intervals, intervals)
     return intervals
 
 
@@ -588,6 +736,8 @@ def create_time_cohorts(series: pd.Series, max_cohorts: int = 30) -> tuple:
     try:
         qbins = pd.qcut(days, q=n_cohorts, precision=0, duplicates='drop')
     except ValueError:
+        logger.warning('create_time_cohorts: qcut не удался (n_cohorts=%d) — '
+                       'режим raw', n_cohorts)
         return series_dt.dt.strftime('%Y-%m-%d').astype('str'), {'mode': 'raw'}
 
     # Генерируем строковые метки для всех интервалов сразу
@@ -618,7 +768,8 @@ def create_time_cohorts(series: pd.Series, max_cohorts: int = 30) -> tuple:
             for left, right, label in zip(lefts, rights, interval_labels)
         ],
     }
-
+    logger.info('create_time_cohorts: base_date=%s, когорт=%d, missing_label=%s',
+                spec['base_date'], len(spec['intervals']), missing_label)
     return cohort_labels, spec
 
 
@@ -649,17 +800,20 @@ def compute_drift_reference(df: pd.DataFrame, columns=_MEDIAN_COLUMNS,
     скользящего окна запросов против этих бинов. Пропуски и сентинель стажа
     -999999 игнорируются (ожидается фрейм после coerce_numeric).
     """
-    reference = {}
-    for col in columns:
+    reference: Dict[str, Any] = {}
+    disable = len(df) < PROGRESS_MIN_ROWS
+    for col in _progress(list(columns), desc='compute_drift_reference', disable=disable):
         if col not in df.columns:
             continue
         values = pd.to_numeric(df[col], errors='coerce')
         values = values.replace(np.float64(-999999.0), np.nan).dropna()
         if values.nunique() < 2:
+            logger.debug('compute_drift_reference: %s пропущен (уникальных < 2)', col)
             continue
         edges = np.unique(
             values.quantile(np.linspace(0.0, 1.0, n_bins + 1)).to_numpy(dtype=float))
         if len(edges) < 3:  # гистограмма из 1-2 бинов неинформативна
+            logger.debug('compute_drift_reference: %s пропущен (бинов < 3)', col)
             continue
         edges[0], edges[-1] = -np.inf, np.inf
         counts, _ = np.histogram(values.to_numpy(dtype=float), bins=edges)
@@ -667,6 +821,9 @@ def compute_drift_reference(df: pd.DataFrame, columns=_MEDIAN_COLUMNS,
             'edges': [float(edge) for edge in edges],
             'shares': (counts / counts.sum()).tolist(),
         }
+        logger.debug('compute_drift_reference: %s — бинов %d, значений %d',
+                     col, len(edges) - 1, int(counts.sum()))
+    logger.info('compute_drift_reference: колонок в эталоне: %d', len(reference))
     return reference
 
 
@@ -686,59 +843,88 @@ def fit_preprocessing_params(fit_df: pd.DataFrame, *, rare_threshold: float = 0.
     таргет не должен влиять на статистики. Агрегаты (`mean_renta_by_*` и др.)
     здесь не считаются — они обучаются в `feature_engineering` на train-части.
     """
-    df = coerce_numeric(fit_df.copy())
+    logger.info('fit_preprocessing_params: старт, train %s '
+                '(rare_threshold=%.3f, n_age_intervals=%d, max_cohorts=%d, '
+                'clip_quantiles=%s, drift_bins=%d)',
+                _shape(fit_df), rare_threshold, n_age_intervals, max_cohorts,
+                clip_quantiles, drift_bins)
+    overall_start = time.perf_counter()
+
+    with _timed('fit_preprocessing_params: coerce_numeric'):
+        df = coerce_numeric(fit_df.copy())
     df = df.drop(columns=['purchase'], errors='ignore')
 
-    medians = {col: float(df[col].median()) for col in _MEDIAN_COLUMNS if col in df.columns}
-    modes_columns = [col for col in df.columns
-                     if col not in _MODES_EXCLUDED and col not in _DERIVED_COLUMNS]
-    modes = {}
-    for col in modes_columns:
-        mode = df[col].mode(dropna=True)
-        if not mode.empty:
-            modes[col] = mode.iloc[0]
+    with _timed('fit_preprocessing_params: медианы и моды'):
+        medians = {col: float(df[col].median()) for col in _MEDIAN_COLUMNS if col in df.columns}
+        modes_columns = [col for col in df.columns
+                         if col not in _MODES_EXCLUDED and col not in _DERIVED_COLUMNS]
+        modes = {}
+        disable = len(df) < PROGRESS_MIN_ROWS
+        for col in _progress(modes_columns, desc='fit: modes', disable=disable):
+            mode = df[col].mode(dropna=True)
+            if not mode.empty:
+                modes[col] = mode.iloc[0]
+    logger.info('fit_preprocessing_params: медианы=%s, мод посчитано=%d',
+                medians, len(modes))
 
     # Порядок повторяет обучающий и продовый пайплайн: fillna → бины
     # возраста → когорты дат → сворачивание редких категорий → клиппинг.
-    work = fill_missing(df, medians, modes)
+    with _timed('fit_preprocessing_params: fill_missing'):
+        work = fill_missing(df, medians, modes)
 
     products_present = [product for product in PRODUCTS if product in work.columns]
     if not products_present or 'age' not in work.columns:
         raise ValueError('для возрастных интервалов нужны колонки age и продуктовые флаги')
-    work = add_total_products(work, products_present)
-    age_intervals = calculate_age_intervals(work, n_age_intervals)
-    work = add_age_interval(work, age_intervals)
 
-    date_cohorts = {}
-    for col in ('fecha_alta', 'ult_fec_cli_1t'):
-        if col not in work.columns:
-            continue
-        raw_dates = work[col].copy()  # моды уже подставлены — как при обучении
-        cohorts, spec = create_time_cohorts(work[col], max_cohorts=max_cohorts)
-        work[col] = cohorts.to_numpy()
-        date_cohorts[col] = spec
-        if spec.get('mode') == 'intervals':
-            mismatches = count_cohort_mismatches(raw_dates, cohorts, spec)
-            if mismatches:
-                logger.warning('Спецификация когорт %s не воспроизводит %s значений '
-                               'обучения', col, mismatches)
+    with _timed('fit_preprocessing_params: age_intervals'):
+        work = add_total_products(work, products_present)
+        age_intervals = calculate_age_intervals(work, n_age_intervals)
+        work = add_age_interval(work, age_intervals)
 
-    # Редкие категории: как при обучении — частоты считаются в строковом
-    # домене (astype(str)), продуктовые флаги не сворачиваются.
-    replacer_columns = [col for col in modes_columns if col not in PRODUCTS]
-    replacer = {}
-    for col in replacer_columns:
-        as_str = work[col].astype(str)
-        counts = as_str.value_counts(normalize=True)
-        rare_values = counts[counts < rare_threshold].index
-        replacer[col] = {str(value): 'other' for value in rare_values}
+    with _timed('fit_preprocessing_params: date_cohorts'):
+        date_cohorts = {}
+        for col in ('fecha_alta', 'ult_fec_cli_1t'):
+            if col not in work.columns:
+                continue
+            raw_dates = work[col].copy()  # моды уже подставлены — как при обучении
+            cohorts, spec = create_time_cohorts(work[col], max_cohorts=max_cohorts)
+            work[col] = cohorts.to_numpy()
+            date_cohorts[col] = spec
+            if spec.get('mode') == 'intervals':
+                mismatches = count_cohort_mismatches(raw_dates, cohorts, spec)
+                if mismatches:
+                    logger.warning('Спецификация когорт %s не воспроизводит %s значений '
+                                   'обучения', col, mismatches)
 
-    clip_bounds = {}
-    lower_q, upper_q = clip_quantiles
-    for col in ('renta', 'antiguedad'):
-        if col in work.columns:
-            clip_bounds[col] = [float(work[col].quantile(lower_q)),
-                                float(work[col].quantile(upper_q))]
+    with _timed('fit_preprocessing_params: replacer (редкие категории)'):
+        # Редкие категории: как при обучении — частоты считаются в строковом
+        # домене (astype(str)), продуктовые флаги не сворачиваются.
+        replacer_columns = [col for col in modes_columns if col not in PRODUCTS]
+        replacer = {}
+        disable = len(work) < PROGRESS_MIN_ROWS
+        for col in _progress(replacer_columns, desc='fit: rare→other', disable=disable):
+            as_str = work[col].astype(str)
+            counts = as_str.value_counts(normalize=True)
+            rare_values = counts[counts < rare_threshold].index
+            replacer[col] = {str(value): 'other' for value in rare_values}
+        n_replacer = sum(1 for values in replacer.values() if values)
+    logger.info('fit_preprocessing_params: колонок с редкими категориями: %d из %d',
+                n_replacer, len(replacer_columns))
+
+    with _timed('fit_preprocessing_params: clip_bounds'):
+        clip_bounds = {}
+        lower_q, upper_q = clip_quantiles
+        for col in ('renta', 'antiguedad'):
+            if col in work.columns:
+                clip_bounds[col] = [float(work[col].quantile(lower_q)),
+                                    float(work[col].quantile(upper_q))]
+    logger.info('fit_preprocessing_params: clip_bounds=%s', clip_bounds)
+
+    with _timed('fit_preprocessing_params: drift_reference'):
+        drift_reference = compute_drift_reference(df, drift_columns, drift_bins)
+
+    logger.info('fit_preprocessing_params: готово за %.2f с',
+                time.perf_counter() - overall_start)
 
     return PreprocessingParams(
         medians=medians,
@@ -747,7 +933,7 @@ def fit_preprocessing_params(fit_df: pd.DataFrame, *, rare_threshold: float = 0.
         age_intervals=[[int(lower), int(upper)] for lower, upper in age_intervals],
         date_cohorts=date_cohorts,
         replacer=replacer,
-        drift_reference=compute_drift_reference(df, drift_columns, drift_bins),
+        drift_reference=drift_reference,
         source='fit(train)',
     )
 
@@ -759,6 +945,9 @@ def apply_preprocessing(df: pd.DataFrame, params: PreprocessingParams) -> pd.Dat
     (кроме ALS-рекомендации: здесь колонка `recommended_product_id` ожидается
     уже подмёргнутой, а на проде её добавляет `add_personal_recommendation`).
     """
+    logger.info('apply_preprocessing: вход %s, источник параметров: %s',
+                _shape(df), params.source)
+    overall_start = time.perf_counter()
     df = coerce_numeric(df)
     df = fill_missing(df, params.medians, params.modes)
     if 'age' in df.columns:
@@ -768,6 +957,8 @@ def apply_preprocessing(df: pd.DataFrame, params: PreprocessingParams) -> pd.Dat
     df = clip_numbers(df, params.clip_bounds)
     if all(product in df.columns for product in PRODUCTS):
         df = add_total_products(df)
+    logger.info('apply_preprocessing: выход %s за %.2f с',
+                _shape(df), time.perf_counter() - overall_start)
     return df
 
 
@@ -796,6 +987,8 @@ def temporal_split(dates: pd.Series, test_size: float = 0.3) -> tuple:
         index = min(max(index, 0), len(unique_dates) - 2)
         cutoff = pd.Timestamp(unique_dates[index])
         test_mask = normalized > cutoff
+    logger.info('temporal_split: строк %d, cutoff=%s, train=%d, test=%d',
+                len(normalized), cutoff.date(), int((~test_mask).sum()), int(test_mask.sum()))
     return cutoff, ~test_mask, test_mask
 
 
@@ -808,6 +1001,7 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
     трансформации общие для прода и обучения — `apply_preprocessing`.
     Бросает ValueError, если в профиле нет обязательных колонок.
     """
+    logger.debug('prepare_features: старт (params.source=%s)', params.source)
     row = pd.DataFrame([profile])
     row = row.drop(columns=list(EXCLUDED_COLUMNS), errors='ignore')
 
@@ -856,4 +1050,5 @@ def prepare_features(profile: Dict[str, Any], params: PreprocessingParams,
     absent = sorted(expected - set(row.columns))
     if absent:
         logger.error('В матрице признаков нет колонок модели: %s', absent)
+    logger.debug('prepare_features: готово, форма %s', _shape(row))
     return row
