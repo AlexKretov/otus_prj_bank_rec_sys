@@ -6,8 +6,8 @@
   "experiment": "RecSys_Modeling",
   "dataset": "data/train_ver2.csv",
   "target": {
-    "definition": "первый продукт, купленный клиентом в 2016 году, из шорт-листа",
-    "shortlist_rule": "доля покупок 2015 года >= 1%",
+    "definition": "первый продукт, купленный клиентом в следующем снимке (таргет строится по всем клиентам снимка, без фильтрации по истории ALS)",
+    "shortlist_rule": "доля покупок обучающего периода (до cutoff) >= 1%",
     "classes": {
       "0": "no_purchase",
       "3": "ind_cco_fin_ult1",
@@ -26,11 +26,15 @@
     }
   },
   "split": {
-    "type": "temporal_fecha_alta",
+    "type": "calendar_snapshot_month",
     "cutoff": "2016-01-01",
-    "test_size": 0.3,
-    "definition": "train: клиенты, привлечённые до cutoff (fecha_alta); test: новее",
-    "fit": "статистики предобработки и агрегаты обучены только на train"
+    "definition": "train: снимки 2015-02-28 … 2015-12-28; test: снимки 2016-01-28 … 2016-04-28",
+    "fit": "статистики предобработки и агрегаты обучены только на train",
+    "secondary_protocol": {
+      "type": "cohort_fecha_alta",
+      "definition": "train: клиенты, привлечённые до cutoff по fecha_alta; test: более новые клиенты",
+      "note": "результаты обоих протоколов — artifacts/split_comparison.csv"
+    }
   },
   "train_shape": [
     8399876,
@@ -99,7 +103,8 @@
     "99": "other"
   },
   "notes": [
-    "Числа синхронизированы с выводами modeling.ipynb и artifacts/classification_report.txt.",
+    "Числа соответствуют прогону c0de098c36604315ab771d51c7ecb033 и синхронизированы с artifacts/classification_report.txt.",
+    "Файл полностью перезаписывается прогоном modeling.ipynb: к полям выше добавляются winner_model, model_comparison, top_k, als_ablation и split_protocols — сравнение Random Forest и CatBoost, метрики precision@K/recall@K/NDCG@K финального классификатора, абляция ALS-признака и второй (когортный) протокол.",
     "fastapi/saved_model.pkl не хранится в Git из-за размера и создаётся запуском modeling.ipynb."
   ]
 }

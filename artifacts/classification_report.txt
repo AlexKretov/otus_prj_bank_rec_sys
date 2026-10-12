@@ -1,6 +1,6 @@
 Отчёт о качестве последнего обучающего запуска (modeling.ipynb)
-Целевая переменная: первый купленный продукт 2016 года из шорт-листа; классы: {0: 'no_purchase', 3: 'ind_cco_fin_ult1', 5: 'ind_cno_fin_ult1', 8: 'ind_ctop_fin_ult1', 9: 'ind_ctpp_fin_ult1', 12: 'ind_dela_fin_ult1', 13: 'ind_ecue_fin_ult1', 18: 'ind_reca_fin_ult1', 19: 'ind_tjcr_fin_ult1', 20: 'ind_valo_fin_ult1', 22: 'ind_nomina_ult1', 23: 'ind_nom_pens_ult1', 24: 'ind_recibo_ult1', 99: 'other'}
-Разбиение: временное по дате привлечения клиента (fecha_alta), cutoff 2016-01-01; train: (8399876, 57), test: (3690523, 57)
+Целевая переменная: первый продукт, купленный клиентом в следующем снимке; классы: {0: 'no_purchase', 3: 'ind_cco_fin_ult1', 5: 'ind_cno_fin_ult1', 8: 'ind_ctop_fin_ult1', 9: 'ind_ctpp_fin_ult1', 12: 'ind_dela_fin_ult1', 13: 'ind_ecue_fin_ult1', 18: 'ind_reca_fin_ult1', 19: 'ind_tjcr_fin_ult1', 20: 'ind_valo_fin_ult1', 22: 'ind_nomina_ult1', 23: 'ind_nom_pens_ult1', 24: 'ind_recibo_ult1', 99: 'other'}
+Разбиение: календарное по дате снимка (temporal_snapshot_month), cutoff 2016-01-01; train: (8399876, 57), test: (3690523, 57)
 Статистики предобработки и агрегаты обучены только на train; гиперпараметры выбраны по CV на train, тест использован один раз
 
 Взвешенные метрики (доминирует класс "покупки не было"):

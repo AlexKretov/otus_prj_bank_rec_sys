@@ -62,3 +62,41 @@ def test_replacer_json_loads():
             assert isinstance(payload, dict) and payload
             return
     pytest.skip('нет replacer.json')
+
+
+def _read_csv(name):
+    path = Path('artifacts') / name
+    if not path.exists():
+        pytest.skip(f'нет artifacts/{name}')
+    return pd.read_csv(path)
+
+
+def test_model_comparison_covers_both_arms():
+    """Сравнение моделей должно содержать оба плеча эксперимента."""
+    table = _read_csv('model_comparison.csv')
+    assert {'model', 'cv_roc_auc_macro', 'roc_auc_ovr_macro', 'pr_auc_macro'} <= set(table)
+    assert {'random_forest', 'catboost'} <= set(table['model'])
+
+
+def test_topk_metrics_have_ranking_columns():
+    """Top-K метрики финального классификатора: precision/recall/NDCG и бейзлайны."""
+    table = _read_csv('topk_metrics.csv')
+    required = {'scope', 'k', 'users', 'precision_at_k', 'recall_at_k', 'ndcg_at_k',
+                'random_precision_at_k', 'popularity_precision_at_k'}
+    assert required <= set(table), f'в topk_metrics.csv нет колонок: {required - set(table)}'
+    assert {'shortlist_purchasers', 'purchasers_any', 'all_rows'} <= set(table['scope'])
+    assert table['ndcg_at_k'].between(0, 1).all()
+
+
+def test_als_ablation_has_both_variants():
+    """Абляция ALS-признака: модель с признаком и без него на одном тесте."""
+    table = _read_csv('als_ablation.csv')
+    assert {'variant', 'roc_auc_ovr_macro', 'pr_auc_macro'} <= set(table)
+    assert {'with_als', 'without_als'} <= set(table['variant'])
+
+
+def test_split_comparison_covers_both_protocols():
+    """Два протокола разбиения: календарный (основной) и когортный по fecha_alta."""
+    table = _read_csv('split_comparison.csv')
+    assert {'protocol', 'cutoff', 'train_rows', 'test_rows', 'pr_auc_macro'} <= set(table)
+    assert {'calendar_snapshot_month', 'cohort_fecha_alta'} <= set(table['protocol'])
