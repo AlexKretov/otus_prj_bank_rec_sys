@@ -152,6 +152,7 @@ def build_classifier(model_kind: str, *, seed: int = 0,
             verbose=0,
             allow_writing_files=False,
             thread_count=-1,
+            task_type='GPU',
             cat_features=list(categorical_features))
     raise ValueError(f'неизвестная модель: {model_kind!r}; ожидается одна из {MODEL_KINDS}')
 

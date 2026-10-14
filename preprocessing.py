@@ -287,7 +287,63 @@ def find_interval(input_date: Any, intervals: List[str]) -> Optional[str]:
         if start_date <= parsed <= end_date:
             return interval
     return None
+def _vectorized_date_cohorts(series: pd.Series, spec: Dict[str, Any]) -> pd.Series:
+    """Векторная версия `map_date_to_cohort` для колонки целиком.
 
+    Построчный `.apply(map_date_to_cohort)` на панели 8.4M строк × 2 колонки
+    занимал ~час: на каждую строку заново парсились base_date и значение,
+    считались дни и пробегался цикл по интервалам. Здесь всё то же самое,
+    но одним pandas/numpy-проходом: парсинг, дни, `pd.cut`.
+
+    Семантика совпадает с построчным вариантом:
+      * режим `raw` → строка 'YYYY-MM-DD' либо 'unknown';
+      * интервалы полуоткрытые слева `(left_days, right_days]` — ровно как
+        в `map_date_to_cohort` и в `create_time_cohorts`;
+      * для NaT-дат возвращается `missing_label` (обычно 'nan');
+      * значение вне всех интервалов → 'unknown'.
+    """
+    if spec.get('mode') == 'raw':
+        parsed = pd.to_datetime(series, errors='coerce')
+        return parsed.dt.strftime('%Y-%m-%d').fillna('unknown')
+
+    base_date = pd.Timestamp(spec['base_date']).normalize()
+    parsed = pd.to_datetime(series, errors='coerce')
+    days = (parsed.dt.normalize() - base_date).dt.days
+
+    intervals = spec['intervals']
+    bins = [intervals[0]['left_days']] + [iv['right_days'] for iv in intervals]
+    labels = [iv['label'] for iv in intervals]
+    # pd.cut(right=True) — интервалы (a, b], совпадает с оригиналом
+    result = pd.cut(days, bins=bins, labels=labels, right=True).astype(object)
+
+    missing_mask = days.isna()
+    if missing_mask.any():
+        result[missing_mask] = spec.get('missing_label', 'unknown')
+    leftover = result.isna()
+    if leftover.any():
+        # значения вне обучающих интервалов: построчный код возвращал 'unknown'
+        result[leftover] = 'unknown'
+    return result
+
+
+def _vectorized_legacy_intervals(series: pd.Series, intervals: List[str]) -> pd.Series:
+    """Векторная версия `find_interval` для колонки целиком (резервный режим).
+
+    Используется, только если в артефакте нет `date_cohorts` из обучающего
+    запуска. `np.select` применяет условия в исходном порядке — эквивалентно
+    тому, что построчный `find_interval` возвращает первый матч.
+    """
+    parsed = pd.to_datetime(series, errors='coerce')
+    conditions: List[np.ndarray] = []
+    choices: List[str] = []
+    for interval in intervals:
+        start, end = _parse_interval_bounds(interval)
+        conditions.append(((parsed >= start) & (parsed <= end)).to_numpy())
+        choices.append(interval)
+    if not conditions:
+        return pd.Series([None] * len(series), index=series.index, dtype=object)
+    result = np.select(conditions, choices, default=None)
+    return pd.Series(result, index=series.index, dtype=object)
 
 def map_date_to_cohort(value: Any, cohort_spec: Dict[str, Any]) -> str:
     """Маппит дату в когорту из `date_cohorts` обучающего запуска.
@@ -369,69 +425,60 @@ def add_age_interval(df: pd.DataFrame, age_intervals: List[List[int]]) -> pd.Dat
 
 def add_date_cohorts(df: pd.DataFrame, date_cohorts: Dict[str, Any],
                      date_intervals: Dict[str, List[str]]) -> pd.DataFrame:
-    """Когорты дат: спецификация из обучения, иначе резервные интервалы."""
+    """Когорты дат: спецификация из обучения, иначе резервные интервалы.
+
+    Векторизовано: построчный `.apply(map_date_to_cohort)` на панели 8.4M
+    строк × 2 колонки был главным узким местом `apply_preprocessing`
+    (~1 час против ~секунд у векторизованной версии). Логика и результат
+    совпадают с построчным вариантом — см. `_vectorized_date_cohorts`.
+    """
     processed: List[str] = []
     for col in ('fecha_alta', 'ult_fec_cli_1t'):
         if col not in df.columns:
             continue
-        if date_cohorts.get(col):
-            spec = date_cohorts[col]
-            df[col] = df[col].apply(lambda value, spec=spec: map_date_to_cohort(value, spec))
-            logger.debug('add_date_cohorts: %s → %s (интервалов %d)',
-                         col, spec.get('mode'), len(spec.get('intervals', ())))
-        else:
-            df[col] = df[col].apply(lambda value: find_interval(value, date_intervals[col]))
-            logger.debug('add_date_cohorts: %s → резервные интервалы (%d шт.)',
-                         col, len(date_intervals[col]))
-        processed.append(col)
+        with _timed(f'add_date_cohorts: {col}'):
+            if date_cohorts.get(col):
+                spec = date_cohorts[col]
+                df[col] = _vectorized_date_cohorts(df[col], spec)
+                logger.debug('add_date_cohorts: %s → %s (интервалов %d)',
+                             col, spec.get('mode'), len(spec.get('intervals', ())))
+            else:
+                df[col] = _vectorized_legacy_intervals(df[col], date_intervals[col])
+                logger.debug('add_date_cohorts: %s → резервные интервалы (%d шт.)',
+                             col, len(date_intervals[col]))
+            processed.append(col)
     if not processed:
         logger.debug('add_date_cohorts: колонок для когорт нет')
     return df
 
 
-def fold_rare_categories(df: pd.DataFrame, replacer: Dict[str, Dict[str, str]],
-                         columns: Optional[List[str]] = None) -> pd.DataFrame:
-    """Сворачивает редкие категории в 'other' по словарю из обучения.
+def add_date_cohorts(df: pd.DataFrame, date_cohorts: Dict[str, Any],
+                     date_intervals: Dict[str, List[str]]) -> pd.DataFrame:
+    """Когорты дат: спецификация из обучения, иначе резервные интервалы.
 
-    Ключи словаря, сгенерированного при обучении, — строки (на обучении
-    колонки приводились к str до подсчёта частот). Поэтому для словарей со
-    строковыми ключами сравнение ведём в строковом домене: значения колонки
-    приводятся к str, и float `28.0` из запроса матчится с ключом `'28.0'`
-    ровно так же, как на обучении. Словари с нестроковыми ключами
-    (ручные/тестовые) обрабатываются в исходном числовом домене.
-
-    Пустые словари — тождественное преобразование — пропускаются.
+    Векторизовано: построчный `.apply(map_date_to_cohort)` на панели 8.4M
+    строк × 2 колонки был главным узким местом `apply_preprocessing`
+    (~1 час против ~секунд у векторизованной версии). Логика и результат
+    совпадают с построчным вариантом — см. `_vectorized_date_cohorts`.
     """
-    target_columns = [
-        col for col in (CATEGORICAL_COLUMNS if columns is None else columns)
-        if replacer.get(col) and col in df.columns
-    ]
-    if not target_columns:
-        logger.debug('fold_rare_categories: нечего сворачивать')
-        return df
-
-    disable = len(df) < PROGRESS_MIN_ROWS
-    replaced_total = 0
-    for col in _progress(target_columns, desc='fold_rare_categories', disable=disable):
-        mapping = replacer[col]
-        if all(isinstance(key, str) for key in mapping):
-            values = df[col].astype(str)
-            rare_mask = values.isin(mapping)
-        else:  # числовые ключи: сравниваем в исходном домене
-            values = df[col]
-            rare_mask = values.isin(mapping)
-        n_replaced = int(rare_mask.sum())
-        replaced_total += n_replaced
-        if n_replaced:
-            if isinstance(df[col].dtype, pd.CategoricalDtype):
-                # присвоение 'other' в category-dtype упало бы: значения нет
-                # в категориях — переводим колонку в object
-                df[col] = df[col].astype(object)
-            df.loc[rare_mask, col] = values[rare_mask].map(mapping)
-    logger.debug('fold_rare_categories: колонок %d, значений свёрнуто %d',
-                 len(target_columns), replaced_total)
+    processed: List[str] = []
+    for col in ('fecha_alta', 'ult_fec_cli_1t'):
+        if col not in df.columns:
+            continue
+        with _timed(f'add_date_cohorts: {col}'):
+            if date_cohorts.get(col):
+                spec = date_cohorts[col]
+                df[col] = _vectorized_date_cohorts(df[col], spec)
+                logger.debug('add_date_cohorts: %s → %s (интервалов %d)',
+                             col, spec.get('mode'), len(spec.get('intervals', ())))
+            else:
+                df[col] = _vectorized_legacy_intervals(df[col], date_intervals[col])
+                logger.debug('add_date_cohorts: %s → резервные интервалы (%d шт.)',
+                             col, len(date_intervals[col]))
+            processed.append(col)
+    if not processed:
+        logger.debug('add_date_cohorts: колонок для когорт нет')
     return df
-
 
 def clip_numbers(df: pd.DataFrame, clip_bounds: Dict[str, List[float]]) -> pd.DataFrame:
     """Отсекает выбросы по квантильным границам из обучения."""
@@ -791,7 +838,57 @@ def count_cohort_mismatches(raw_dates: pd.Series, cohorts: pd.Series,
     restored[days.isna()] = spec.get('missing_label', 'unknown')
     return int((restored.astype(str).to_numpy() != cohorts.astype(str).to_numpy()).sum())
 
+def fold_rare_categories(df: pd.DataFrame, replacer: Dict[str, Dict[str, str]],
+                         columns: Optional[List[str]] = None) -> pd.DataFrame:
+    """Сворачивает редкие категории в 'other' по словарю из обучения.
 
+    Ключи словаря, сгенерированного при обучении, — строки (на обучении
+    колонки приводились к str до подсчёта частот). Поэтому для словарей со
+    строковыми ключами сравнение ведём в строковом домене: значения колонки
+    приводятся к str, и float `28.0` из запроса матчится с ключом `'28.0'`
+    ровно так же, как на обучении. Словари с нестроковыми ключами
+    (ручные/тестовые) обрабатываются в исходном числовом домене.
+
+    Раньше использовалось `df.loc[rare_mask, col] = values[rare_mask].map(mapping)`:
+    это медленный fancy-indexing со сменой dtype колонки, к тому же дававший
+    FutureWarning про несовместимый dtype. `Series.map(...).fillna(df[col])`
+    делает ту же выборочную замену одним векторизованным проходом.
+
+    Пустые словари — тождественное преобразование — пропускаются.
+    """
+    target_columns = [
+        col for col in (CATEGORICAL_COLUMNS if columns is None else columns)
+        if replacer.get(col) and col in df.columns
+    ]
+    if not target_columns:
+        logger.debug('fold_rare_categories: нечего сворачивать')
+        return df
+
+    disable = len(df) < PROGRESS_MIN_ROWS
+    replaced_total = 0
+    for col in _progress(target_columns, desc='fold_rare_categories', disable=disable):
+        mapping = replacer[col]
+        if all(isinstance(key, str) for key in mapping):
+            values = df[col].astype(str)
+        else:  # числовые ключи: сравниваем в исходном домене
+            values = df[col]
+
+        rare_mask = values.isin(mapping.keys())
+        n_replaced = int(rare_mask.sum())
+        if not n_replaced:
+            continue
+        replaced_total += n_replaced
+
+        # Одна замена вместо df.loc[rare_mask, col] = ...:
+        # map возвращает NaN там, где ключа нет; fillna(df[col]) подставляет
+        # исходное значение — эквивалентно выборочной замене по маске.
+        # category-dtype pandas сам переведёт в object при присвоении строк.
+        mapped = values.map(mapping)
+        df[col] = mapped.fillna(df[col])
+    logger.debug('fold_rare_categories: колонок %d, значений свёрнуто %d',
+                 len(target_columns), replaced_total)
+    return df
+    
 def compute_drift_reference(df: pd.DataFrame, columns=_MEDIAN_COLUMNS,
                             n_bins: int = 10) -> Dict[str, Any]:
     """Эталонные гистограммы входных числовых признаков для дрейф-мониторинга.
@@ -944,19 +1041,63 @@ def apply_preprocessing(df: pd.DataFrame, params: PreprocessingParams) -> pd.Dat
     Тот же кодовый путь и порядок шагов, что в `prepare_features` на проде
     (кроме ALS-рекомендации: здесь колонка `recommended_product_id` ожидается
     уже подмёргнутой, а на проде её добавляет `add_personal_recommendation`).
+
+    Логирование стадий и общий прогресс-бар: на панели 8.4M строк каждый шаг
+    идёт секунды-минуты, и без пошагового тайминга не видно, на каком из них
+    мы сидим (главный тормоз раньше был в `add_date_cohorts`).
     """
     logger.info('apply_preprocessing: вход %s, источник параметров: %s',
                 _shape(df), params.source)
     overall_start = time.perf_counter()
-    df = coerce_numeric(df)
-    df = fill_missing(df, params.medians, params.modes)
+
+    # Внешний прогресс-бар — по стадиям пайплайна. Внутренний прогресс
+    # (по колонкам) есть у fold_rare_categories; tqdm корректно вкладывает их.
+    stages = (
+        'coerce_numeric', 'fill_missing', 'add_age_interval', 'add_date_cohorts',
+        'fold_rare_categories', 'clip_numbers', 'add_total_products',
+    )
+    show_pbar = _HAS_TQDM and len(df) >= PROGRESS_MIN_ROWS
+    pbar = _tqdm(total=len(stages), desc='apply_preprocessing',
+                 leave=False) if show_pbar else None
+
+    def _stage_done(name: str) -> None:
+        if pbar is not None:
+            pbar.set_postfix_str(name, refresh=False)
+            pbar.update(1)
+        logger.info('apply_preprocessing: стадия %s завершена', name)
+
+    with _timed('apply_preprocessing: coerce_numeric'):
+        df = coerce_numeric(df)
+    _stage_done('coerce_numeric')
+
+    with _timed('apply_preprocessing: fill_missing'):
+        df = fill_missing(df, params.medians, params.modes)
+    _stage_done('fill_missing')
+
     if 'age' in df.columns:
-        df = add_age_interval(df, params.age_intervals)
-    df = add_date_cohorts(df, params.date_cohorts, params.date_intervals)
-    df = fold_rare_categories(df, params.replacer)
-    df = clip_numbers(df, params.clip_bounds)
+        with _timed('apply_preprocessing: add_age_interval'):
+            df = add_age_interval(df, params.age_intervals)
+    _stage_done('add_age_interval')
+
+    with _timed('apply_preprocessing: add_date_cohorts'):
+        df = add_date_cohorts(df, params.date_cohorts, params.date_intervals)
+    _stage_done('add_date_cohorts')
+
+    with _timed('apply_preprocessing: fold_rare_categories'):
+        df = fold_rare_categories(df, params.replacer)
+    _stage_done('fold_rare_categories')
+
+    with _timed('apply_preprocessing: clip_numbers'):
+        df = clip_numbers(df, params.clip_bounds)
+    _stage_done('clip_numbers')
+
     if all(product in df.columns for product in PRODUCTS):
-        df = add_total_products(df)
+        with _timed('apply_preprocessing: add_total_products'):
+            df = add_total_products(df)
+    _stage_done('add_total_products')
+
+    if pbar is not None:
+        pbar.close()
     logger.info('apply_preprocessing: выход %s за %.2f с',
                 _shape(df), time.perf_counter() - overall_start)
     return df
